@@ -1,0 +1,60 @@
+name: Stock Bot (IPO + Reverse Splits)
+
+on:
+  schedule:
+    # كل 10 دقائق خلال ساعات السوق الأمريكي (بتوقيت UTC)
+    # Pre-market يبدأ ~4:00 AM ET = 8:00 UTC
+    # After-hours ينتهي ~8:00 PM ET = 00:00 UTC
+    - cron: '*/10 8-23 * * 1-5'   # الإثنين–الجمعة من 8:00 إلى 23:50 UTC
+    - cron: '*/10 0 * * 2-6'      # منتصف الليل UTC (آخر ساعة After-hours) أيام الثلاثاء–السبت
+
+  workflow_dispatch:  # تشغيل يدوي من GitHub
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Restore watchlist & presplit files
+        uses: actions/cache@v4
+        with:
+          path: |
+            splits_watchlist.json
+            ipo_watchlist.json
+            presplit_floats.json
+          key: stock-bot-data-${{ github.run_id }}
+          restore-keys: |
+            stock-bot-data-
+
+      - name: Run Stock Bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python stock_bot.py
+
+      - name: Save watchlist & presplit files
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            splits_watchlist.json
+            ipo_watchlist.json
+            presplit_floats.json
+          key: stock-bot-data-${{ github.run_id }}
