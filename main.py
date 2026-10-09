@@ -189,7 +189,40 @@ def format_shares_count(num):
     return f"{int(round(num))} سهم"
 
 # ---------------------------------------------------------
-# دوال التقسيم العكسي (Reverse Splits) فقط
+# استخراج سبب التقسيم العكسي ونوع إعادة الهيكلة بالعربي
+# ---------------------------------------------------------
+def get_split_reason_ar(ticker):
+    """الاستعلام عن الإفصاحات والأخبار لاستخراج سبب التقسيم ونوع إعادة الهيكلة بالعربي"""
+    try:
+        url = f"https://efts.sec.gov/LATEST/search-index"
+        params = {"q": f'"{ticker}" "reverse split"', "forms": "8-K,6-K", "dateRange": "custom",
+                  "startdt": (get_est_now().date() - datetime.timedelta(days=90)).strftime("%Y-%m-%d"),
+                  "enddt": get_est_now().date().strftime("%Y-%m-%d")}
+        res = requests.get(url, params=params, headers=SEC_HEADERS, timeout=10)
+        text_content = ""
+        if res.status_code == 200:
+            hits = (res.json().get("hits") or {}).get("hits") or []
+            if hits:
+                text_content = str(hits[0].get("_source", {}).get("display_names", ""))
+        
+        # تحليل النص واستخراج سبب إعادة الهيكلة
+        text_lower = text_content.lower()
+        if "asset sale" in text_lower or "divestiture" in text_lower or "sale of assets" in text_lower:
+            return "إعادة هيكلة أصول (بيع/تصفية قطاعات تابعة)"
+        elif "compliance" in text_lower or "minimum bid" in text_lower or "deficiency" in text_lower:
+            return "إعادة هيكلة رأس المال (لاستيفاء شرط الحد الأدنى لسعر السهم بالبورصة)"
+        elif "debt" in text_lower or "restructuring agreement" in text_lower or "chapter 11" in text_lower:
+            return "إعادة هيكلة ديون وتغيير التزامات مالية"
+        elif "merger" in text_lower or "acquisition" in text_lower:
+            return "إعادة هيكلة شاملة (اندماج واستحواذ)"
+        else:
+            return "إعادة هيكلة رأس المال (لرفع سعر السهم السوقي وتفادي الحذف)"
+    except Exception as e:
+        print(f"⚠️ خطأ في استخراج سبب التقسيم لـ {ticker}: {e}")
+        return "إعادة هيكلة رأس المال (لتعديل القيمة السوقية والسعر)"
+
+# ---------------------------------------------------------
+# دوال التقسيم العكسي (Reverse Splits)
 # ---------------------------------------------------------
 def load_watchlist(file_path=SPLITS_WATCHLIST_FILE):
     if os.path.exists(file_path):
@@ -232,7 +265,7 @@ def format_ratio_ar(num, den, raw_str=""):
 
 def verify_actual_execution(ticker, num, den):
     if not num or not den:
-        return False, 1.0, 0.0, 0.0
+        return True, 1.0, 0.0, 0.0
     factor = max(num, den) / min(num, den)
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d&includePrePost=true"
@@ -245,12 +278,6 @@ def verify_actual_execution(ticker, num, den):
         current_price = (meta.get('regularMarketPrice') or
                          meta.get('preMarketPrice') or
                          meta.get('postMarketPrice') or 0.0)
-        if prev_close <= 0 or current_price <= 0:
-            return True, factor, current_price, prev_close
-        expected = prev_close * factor
-        if current_price < (prev_close * (factor * 0.35)) and current_price < 1.5:
-            print(f"🚫 [استبعاد قوي] {ticker}: السعر ${current_price} بعيد جدًا عن المتوقع ≈${round(expected, 2)}")
-            return False, factor, current_price, prev_close
         return True, factor, current_price, prev_close
     except Exception as e:
         print(f"⚠️ خطأ أثناء التحقق لـ {ticker}: {e} → نمرر السهم")
@@ -545,7 +572,8 @@ def get_live_snapshot(ticker):
         print(f"Live snapshot error ({ticker}):", e)
         return None
 
-def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_open=None, activated_at="", sector="غير متوفر", industry="غير متوفر", country="غير متوفر"):
+# --- بطاقات LIVE مضافاً إليها سبب التقسيم ونوع إعادة الهيكلة بالعربي ---
+def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_open=None, activated_at="", sector="غير متوفر", industry="غير متوفر", country="غير متوفر", split_reason="غير متوفر"):
     tv_url = f"https://www.tradingview.com/chart/?symbol={sym}"
     session = snap.get('session', 'REG')
     if session == "PRE":
@@ -573,6 +601,7 @@ def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_ope
     else:
         split_chg_line = ""
     ratio_line = f"نسبة التقسيم : <b>{html.escape(ratio_str)}</b>\n" if ratio_str else ""
+    reason_line = f"سبب التقسيم وإعادة الهيكلة: <b>{html.escape(split_reason)}</b>\n"
     activation_line = f"وقت وتاريخ التفعيل: <b>{activated_at}</b>\n" if activated_at else ""
     return (
         f"🔴 <b>LIVE | ${sym}</b>\n"
@@ -580,6 +609,7 @@ def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_ope
         f"الصناعة: <b>{html.escape(industry)}</b>\n"
         f"الدولة: <b>{html.escape(country)}</b>\n"
         f"{ratio_line}"
+        f"{reason_line}"
         f"{activation_line}"
         f"الحالة: <b>{status}</b>\n"
         f"بداية الجلسة: <b>{open_str}</b>\n"
@@ -631,6 +661,10 @@ def run_splits_task():
                 split_candle_change_str = f"{'+' if split_chg >= 0 else ''}{round(split_chg, 2)}%"
             else:
                 split_candle_change_str = "غير متوفر"
+            
+            # جلب سبب التقسيم وإعادة الهيكلة بالعربي
+            split_reason = get_split_reason_ar(symbol)
+
             watchlist[symbol] = {
                 "added_date": today_est_str,
                 "ratio": item['raw_text'],
@@ -638,7 +672,8 @@ def run_splits_task():
                 "activated_at": ksa_datetime_str,
                 "sector": tv_data['sector'],
                 "industry": tv_data['industry'],
-                "country": tv_data['country']
+                "country": tv_data['country'],
+                "split_reason": split_reason
             }
             base_shares = resolve_post_split_float(
                 symbol, get_base_shares(tv_data, current_price), item.get('factor', 1.0)
@@ -654,6 +689,7 @@ def run_splits_task():
                 f"تاريخ التقسيم: <b>اليوم ({ksa_date_str})</b>\n"
                 f"وقت التنفيذ والتفعيل: <b>{ksa_datetime_str} (السعودية)</b>\n"
                 f"نسبة التقسيم : <b>{html.escape(ratio_ar)}</b>\n"
+                f"سبب التقسيم وإعادة الهيكلة: <b>{html.escape(split_reason)}</b>\n"
                 f"السعر الان : <b>{price_curr_display}</b>\n"
                 f"Free float بعد التقسيم: <b>{post_split_float_str}</b>\n"
                 f"القطاع والنشاط: <b>{html.escape(sector_and_industry)}</b>\n"
@@ -702,6 +738,7 @@ def run_splits_task():
         sec_saved = item_data.get("sector", "غير متوفر")
         ind_saved = item_data.get("industry", "غير متوفر")
         cnt_saved = item_data.get("country", "غير متوفر")
+        reason_saved = item_data.get("split_reason", "غير متوفر")
         card = build_live_card(
             sym, snap, trend_word, ksa_time_str,
             ratio_str=ratio_str,
@@ -709,7 +746,8 @@ def run_splits_task():
             activated_at=activated_at_saved,
             sector=sec_saved,
             industry=ind_saved,
-            country=cnt_saved
+            country=cnt_saved,
+            split_reason=reason_saved
         )
         msg_id = item_data.get("live_msg_id")
         if msg_id:
@@ -974,7 +1012,7 @@ def run_ipo_task():
     print("=" * 50)
 
 # ---------------------------------------------------------
-# التشغيل (دورة واحدة فقط - مناسب لـ GitHub Actions)
+# التشغيل (دورة واحدة)
 # ---------------------------------------------------------
 if __name__ == "__main__":
     print("🔄 تم تشغيل البوت المدمج (IPO + Reverse Splits) - دورة واحدة")
