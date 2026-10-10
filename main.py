@@ -221,6 +221,26 @@ def get_split_reason_ar(ticker):
         print(f"⚠️ خطأ في استخراج سبب التقسيم لـ {ticker}: {e}")
         return "إعادة هيكلة رأس المال (لتعديل القيمة السوقية والسعر)"
 
+def get_benzinga_split_news(ticker):
+    """أحدث خبر من Benzinga عن تقسيم السهم (آخر 24 ساعة) عبر Google News RSS"""
+    try:
+        import xml.etree.ElementTree as ET
+        from urllib.parse import quote
+        q = quote(f'"{ticker}" "reverse stock split" site:benzinga.com when:1d')
+        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+        res = requests.get(url, headers=COMMON_HEADERS, timeout=10)
+        if res.status_code != 200:
+            return None
+        root = ET.fromstring(res.content)
+        for it in root.iter("item"):
+            title = (it.findtext("title") or "").strip()
+            link = (it.findtext("link") or "").strip()
+            if title and link:
+                return {"title": title, "link": link}
+    except Exception as e:
+        print(f"Benzinga news error ({ticker}): {e}")
+    return None
+
 # ---------------------------------------------------------
 # دوال التقسيم العكسي (Reverse Splits)
 # ---------------------------------------------------------
@@ -797,6 +817,9 @@ def run_splits_task():
             mm_matched = evaluate_mm_criteria(symbol, item.get('factor', 1.0), base_shares, prior_splits, item.get('unscheduled', False))
             mm_line = (f"معايير صناع السوق المتحققة ({len(mm_matched)}/5): <b>{html.escape(' | '.join(mm_matched))}</b>\n"
                        if mm_matched else "معايير صناع السوق المتحققة: <b>لا يوجد</b>\n")
+            bz = get_benzinga_split_news(symbol)
+            bz_line = (f"Benzinga: <a href='{html.escape(bz['link'])}'>{html.escape(bz['title'])}</a>\n"
+                       if bz else "Benzinga: <b>لا يوجد خبر</b>\n")
             ratio_ar = format_ratio_ar(num, den, item['raw_text'])
             sector_and_industry = f"{tv_data['sector']} / {tv_data['industry']}"
             tv_url = f"https://www.tradingview.com/chart/?symbol={symbol}"
@@ -813,6 +836,7 @@ def run_splits_task():
                 f"الدولة: <b>{html.escape(tv_data['country'])}</b>\n"
                 f"تقسيمات سابقه: ( <b>{prior_splits}</b> )\n"
                 f"{mm_line}"
+                f"{bz_line}"
                 f"التغير الحالي ٪+-: <b>{change_pct_str}</b>\n"
                 f"التغير من شمعة التقسيم ٪+-: <b>{split_candle_change_str}</b>\n"
                 f"الشارت: <a href='{tv_url}'>TradingView Chart</a>"
