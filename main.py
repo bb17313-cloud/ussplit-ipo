@@ -322,6 +322,64 @@ def get_today_reverse_splits():
         print(f"❌ Nasdaq API Error ({date_str}):", e)
     return list(splits_dict.values())
 
+def get_unscheduled_reverse_splits(known_symbols):
+    """تقسيمات عكسية منفذة اليوم وغير موجودة في تقويم Nasdaq"""
+    today_est = get_est_now().date()
+    date_str = today_est.strftime("%Y-%m-%d")
+    candidates = []
+    # 1) فلتر مضاربي: أسهم ارتفاعها كبير جداً (غالباً بسبب تعديل التقسيم)
+    for field in ("change", "premarket_change"):
+        try:
+            payload = {
+                "filter": [
+                    {"left": field, "operation": "greater", "right": 80},
+                    {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
+                    {"left": "type", "operation": "equal", "right": "stock"}
+                ],
+                "columns": ["name", field],
+                "sort": {"sortBy": field, "sortOrder": "desc"},
+                "range": [0, 60]
+            }
+            res = requests.post("https://scanner.tradingview.com/america/scan",
+                                json=payload, headers=COMMON_HEADERS, timeout=12)
+            if res.status_code == 200:
+                for row in res.json().get("data", []):
+                    d = row.get("d", [])
+                    if d and d[0] and d[0].upper() not in candidates:
+                        candidates.append(d[0].upper())
+        except Exception as e:
+            print(f"Unscheduled scan error ({field}):", e)
+    # 2) تأكيد وجود تقسيم عكسي منفذ اليوم عبر Yahoo
+    found = []
+    for sym in candidates[:60]:
+        if sym in known_symbols:
+            continue
+        try:
+            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+                   f"?events=splits&interval=1d&range=5d")
+            r = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()['chart']['result'][0]
+            splits = (r.get('events') or {}).get('splits', {})
+            for s in splits.values():
+                n, d_ = s.get('numerator'), s.get('denominator')
+                sdate = s.get('date')
+                if not n or not d_ or sdate is None:
+                    continue
+                s_day = datetime.datetime.fromtimestamp(sdate, ZoneInfo("America/New_York")).date()
+                if n < d_ and s_day == today_est:
+                    found.append({
+                        'symbol': sym,
+                        'num': float(n),
+                        'den': float(d_),
+                        'raw_text': f"{int(n)}-for-{int(d_)}",
+                        'split_date': date_str,
+                        'factor': float(d_) / float(n),
+                        'unscheduled': True
+                    })
+                    break
+        except Exception as e:
+            print(f"Unscheduled verify error ({sym}):", e)
+    return found
+
 def get_tradingview_stock_data(ticker):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
@@ -452,6 +510,60 @@ def get_prior_splits_count(ticker):
     except Exception:
         pass
     return count
+
+def get_prior_split_candle_drops(ticker):
+    """أسوأ تغير لشمعة أسبوعية/شهرية بدأت بتقسيم عكسي سابق"""
+    out = {'weekly': None, 'monthly': None}
+    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    try:
+        for key, interval in (('weekly', '1wk'), ('monthly', '1mo')):
+            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                   f"?events=splits&interval={interval}&range=10y")
+            r = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()['chart']['result'][0]
+            ts = r.get('timestamp') or []
+            q = r['indicators']['quote'][0]
+            splits = (r.get('events') or {}).get('splits', {})
+            for item in splits.values():
+                if not item.get('numerator', 1) < item.get('denominator', 1):
+                    continue
+                sdate = item.get('date')
+                if sdate is None or sdate > now_ts - 86400:
+                    continue
+                idx = None
+                for i, t in enumerate(ts):
+                    if t <= sdate:
+                        idx = i
+                    else:
+                        break
+                if idx is None:
+                    continue
+                o, c = q['open'][idx], q['close'][idx]
+                if not o or not c:
+                    continue
+                chg = (c / o - 1) * 100
+                if out[key] is None or chg < out[key]:
+                    out[key] = chg
+    except Exception as e:
+        print(f"Prior split drops error ({ticker}):", e)
+    return out
+
+def evaluate_mm_criteria(ticker, factor, post_split_float, prior_splits, unscheduled=False):
+    """معايير التقسيم العكسي المفضل لدى صناع السوق"""
+    matched = []
+    if 0 < post_split_float < 900_000:
+        matched.append("Float بعد التقسيم أقل من 900 ألف")
+    drops = get_prior_split_candle_drops(ticker)
+    if drops['weekly'] is not None and drops['weekly'] <= -40:
+        matched.append(f"تقسيم سابق تبعه هبوط أسبوعي {round(drops['weekly'], 1)}%")
+    if drops['monthly'] is not None and drops['monthly'] <= -30:
+        matched.append(f"تقسيم سابق تبعه هبوط شهري {round(drops['monthly'], 1)}%")
+    if factor and factor > 30:
+        matched.append("نسبة تقسيم أعلى من 1:30")
+    if prior_splits + 1 > 3:
+        matched.append("تقسيم مكرر أكثر من 3 مرات")
+    if unscheduled:
+        matched.append("غير مجدول (غير معلن بتقويم Nasdaq)")
+    return matched
 
 def get_split_candle_open(ticker):
     try:
@@ -642,6 +754,8 @@ def run_splits_task():
             cleaned_watchlist[sym] = item
     watchlist = cleaned_watchlist
     splits = get_today_reverse_splits()
+    known_syms = {s['symbol'] for s in splits}
+    splits.extend(get_unscheduled_reverse_splits(known_syms))
     snapshot_next_day_floats()
     if not watchlist.get(sent_today_key):
         updates = []
@@ -680,6 +794,9 @@ def run_splits_task():
             )
             post_split_float_str = format_shares_count(base_shares)
             prior_splits = get_prior_splits_count(symbol)
+            mm_matched = evaluate_mm_criteria(symbol, item.get('factor', 1.0), base_shares, prior_splits, item.get('unscheduled', False))
+            mm_line = (f"معايير صناع السوق المتحققة ({len(mm_matched)}/5): <b>{html.escape(' | '.join(mm_matched))}</b>\n"
+                       if mm_matched else "معايير صناع السوق المتحققة: <b>لا يوجد</b>\n")
             ratio_ar = format_ratio_ar(num, den, item['raw_text'])
             sector_and_industry = f"{tv_data['sector']} / {tv_data['industry']}"
             tv_url = f"https://www.tradingview.com/chart/?symbol={symbol}"
@@ -695,6 +812,7 @@ def run_splits_task():
                 f"القطاع والنشاط: <b>{html.escape(sector_and_industry)}</b>\n"
                 f"الدولة: <b>{html.escape(tv_data['country'])}</b>\n"
                 f"تقسيمات سابقه: ( <b>{prior_splits}</b> )\n"
+                f"{mm_line}"
                 f"التغير الحالي ٪+-: <b>{change_pct_str}</b>\n"
                 f"التغير من شمعة التقسيم ٪+-: <b>{split_candle_change_str}</b>\n"
                 f"الشارت: <a href='{tv_url}'>TradingView Chart</a>"
