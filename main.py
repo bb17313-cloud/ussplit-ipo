@@ -725,3 +725,512 @@ def get_live_snapshot(ticker):
             'high': None, 'low': None, 'vol': official_vol, 'base_price': base_price
         }
         calc_vol = 0.0
+        for i, t in enumerate(ts):
+            o, h, l, c, v = q['open'][i], q['high'][i], q['low'][i], q['close'][i], q['volume'][i]
+            if None in (o, h, l, c, v):
+                continue
+            snap['last'] = c
+            if t >= target_start:
+                if snap['open'] is None:
+                    snap['open'] = o
+                snap['high'] = h if snap['high'] is None else max(snap['high'], h)
+                snap['low'] = l if snap['low'] is None else min(snap['low'], l)
+                calc_vol += v
+        if official_vol and official_vol > 0:
+            snap['vol'] = official_vol
+        else:
+            snap['vol'] = calc_vol
+        if snap['vol'] <= 0:
+            tv_meta = get_tradingview_stock_data(ticker)
+            snap['vol'] = tv_meta.get('volume', 0.0)
+        return snap if snap['last'] else None
+    except Exception as e:
+        print(f"Live snapshot error ({ticker}):", e)
+        return None
+
+# --- بطاقات LIVE فقط (شمعة السيولة السوداء + إشارة الدايموند) ---
+def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_open=None, activated_at="", sector="غير متوفر", industry="غير متوفر", country="غير متوفر", split_reason="غير متوفر"):
+    tv_url = f"https://www.tradingview.com/chart/?symbol={sym}"
+    session = snap.get('session', 'REG')
+    if session == "PRE":
+        status = "🟡 ما قبل الافتتاح (Pre-Market)"
+    elif session == "AH":
+        status = "🌙 ما بعد الإغلاق (After-Hours)"
+    else:
+        status = "🟢 مفتوح (الجلسة الرسمية)"
+    
+    if snap['open'] and snap['open'] > 0:
+        open_str = f"${round(snap['open'], 4)}"
+        base = snap['base_price'] or snap['open']
+        chg = ((snap['last'] / base) - 1) * 100 if base > 0 else 0.0
+        chg_str = f"{'+' if chg >= 0 else ''}{round(chg, 2)}%"
+        hl_str = f"${round(snap['high'], 4)} / ${round(snap['low'], 4)}"
+        vol_val = snap.get('vol', 0)
+        vol_str = f"{int(vol_val):,} سهم" if vol_val > 0 else "—"
+    else:
+        open_str = "بانتظار التداول"
+        chg_str = "—"
+        hl_str = "—"
+        vol_str = "—"
+    
+    if split_open and split_open > 0 and snap.get('last') and snap['last'] > 0:
+        split_chg = ((snap['last'] - split_open) / split_open) * 100
+        split_chg_line = f"التغير من شمعة التقسيم ٪+-: <b>{'+' if split_chg >= 0 else ''}{round(split_chg, 2)}%</b>\n"
+    else:
+        split_chg_line = ""
+    
+    # إعدادات السيولة السوداء والدايموند تظهر فقط في بطاقة التحديث الحي
+    liq_info = analyze_liquidity_and_diamond(sym)
+    if liq_info["has_black_candle"]:
+        black_line = f"⬛ شمعة السيولة السوداء: <b>تم الرصد (فوليوم {liq_info['volume_ratio']}x | هاي: ${liq_info['black_high']})</b>\n"
+    else:
+        black_line = "⬛ شمعة السيولة السوداء: <b>قيد المراقبة (بانتظار تدفق السيولة)</b>\n"
+
+    if liq_info["diamond_breakout"]:
+        diamond_line = f"💎 إشارة دايموند: <b>✨ تم الاختراق الإيجابي فوق ${liq_info['black_high']}</b>\n"
+    else:
+        diamond_line = "💎 إشارة دايموند: <b>⏳ بانتظار اختراق الـ High</b>\n"
+
+    ratio_line = f"نسبة التقسيم : <b>{html.escape(ratio_str)}</b>\n" if ratio_str else ""
+    reason_line = f"سبب التقسيم وإعادة الهيكلة: <b>{html.escape(split_reason)}</b>\n"
+    activation_line = f"وقت وتاريخ التفعيل: <b>{activated_at}</b>\n" if activated_at else ""
+
+    return (
+        f"🔴 <b>LIVE | ${sym}</b>\n"
+        f"القطاع: <b>{html.escape(sector)}</b>\n"
+        f"الصناعة: <b>{html.escape(industry)}</b>\n"
+        f"الدولة: <b>{html.escape(country)}</b>\n"
+        f"{ratio_line}"
+        f"{reason_line}"
+        f"{activation_line}"
+        f"الحالة: <b>{status}</b>\n"
+        f"─────────────────\n"
+        f"{black_line}"
+        f"{diamond_line}"
+        f"─────────────────\n"
+        f"بداية الجلسة: <b>{open_str}</b>\n"
+        f"السعر الآن: <b>${round(snap['last'], 4)}</b>\n"
+        f"التغير للجلسة: <b>{chg_str}</b>\n"
+        f"{split_chg_line}"
+        f"الاتجاه (9 شموع / 3د): <b>{trend_word}</b>\n"
+        f"أعلى / أدنى بالجلسة: <b>{hl_str}</b>\n"
+        f"فوليوم الجلسة: <b>{vol_str}</b>\n"
+        f"آخر تحديث: <b>{ksa_time_str} (السعودية)</b>\n"
+        f"الشارت: <a href='{tv_url}'>TradingView</a>"
+    )
+
+def run_splits_task():
+    print("=" * 50)
+    now_ksa = get_ksa_now()
+    print(f"🔄 [SPLITS] بداية الدورة: {now_ksa.strftime('%Y-%m-%d %H:%M:%S')}")
+    watchlist = load_watchlist(SPLITS_WATCHLIST_FILE)
+    now_est = get_est_now()
+    today_est_str = now_est.strftime("%Y-%m-%d")
+    ksa_date_str = now_ksa.strftime("%Y-%m-%d")
+    ksa_datetime_str = now_ksa.strftime("%Y-%m-%d %H:%M")
+    ksa_time_str = now_ksa.strftime("%H:%M")
+    sent_today_key = f"sent_today_{today_est_str}"
+    cleaned_watchlist = {}
+    for sym, item in watchlist.items():
+        if sym == sent_today_key:
+            cleaned_watchlist[sym] = item
+        elif isinstance(item, dict) and item.get("added_date") == today_est_str:
+            cleaned_watchlist[sym] = item
+    watchlist = cleaned_watchlist
+    splits = get_today_reverse_splits()
+    known_syms = {s['symbol'] for s in splits}
+    splits.extend(get_unscheduled_reverse_splits(known_syms))
+    snapshot_next_day_floats()
+    if not watchlist.get(sent_today_key):
+        updates = []
+        for item in splits:
+            symbol = item['symbol']
+            num = item['num']
+            den = item['den']
+            tv_data = get_tradingview_stock_data(symbol)
+            if not tv_data['is_valid_stock']:
+                continue
+            current_price = tv_data['price']
+            change_pct = tv_data['change_pct']
+            price_curr_display = f"${round(current_price, 4)}"
+            split_open = get_split_candle_open(symbol) or current_price
+            if split_open and split_open > 0 and current_price > 0:
+                split_chg = ((current_price - split_open) / split_open) * 100
+                split_candle_change_str = f"{'+' if split_chg >= 0 else ''}{round(split_chg, 2)}%"
+            else:
+                split_candle_change_str = "غير متوفر"
+            
+            split_reason = get_split_reason_ar(symbol)
+
+            watchlist[symbol] = {
+                "added_date": today_est_str,
+                "ratio": item['raw_text'],
+                "split_open": split_open,
+                "activated_at": ksa_datetime_str,
+                "sector": tv_data['sector'],
+                "industry": tv_data['industry'],
+                "country": tv_data['country'],
+                "split_reason": split_reason
+            }
+            base_shares = resolve_post_split_float(
+                symbol, get_base_shares(tv_data, current_price), item.get('factor', 1.0)
+            )
+            post_split_float_str = format_shares_count(base_shares)
+            prior_splits = get_prior_splits_count(symbol)
+            mm_matched = evaluate_mm_criteria(symbol, item.get('factor', 1.0), base_shares, prior_splits, item.get('unscheduled', False))
+            mm_line = (f"معايير صناع السوق المتحققة ({len(mm_matched)}/5): <b>{html.escape(' | '.join(mm_matched))}</b>\n"
+                       if mm_matched else "معايير صناع السوق المتحققة: <b>لا يوجد</b>\n")
+            bz = get_benzinga_split_news(symbol)
+            bz_line = (f"Benzinga: <a href='{html.escape(bz['link'])}'>{html.escape(bz['title'])}</a>\n"
+                       if bz else "Benzinga: <b>لا يوجد خبر</b>\n")
+            
+            ratio_ar = format_ratio_ar(num, den, item['raw_text'])
+            sector_and_industry = f"{tv_data['sector']} / {tv_data['industry']}"
+            tv_url = f"https://www.tradingview.com/chart/?symbol={symbol}"
+            change_pct_str = f"{'+' if change_pct >= 0 else ''}{round(change_pct, 2)}%"
+            
+            info = (
+                f"🔷 <b>${symbol}</b>\n"
+                f"تاريخ التقسيم: <b>اليوم ({ksa_date_str})</b>\n"
+                f"وقت التنفيذ والتفعيل: <b>{ksa_datetime_str} (السعودية)</b>\n"
+                f"نسبة التقسيم : <b>{html.escape(ratio_ar)}</b>\n"
+                f"سبب التقسيم وإعادة الهيكلة: <b>{html.escape(split_reason)}</b>\n"
+                f"السعر الان : <b>{price_curr_display}</b>\n"
+                f"Free float بعد التقسيم: <b>{post_split_float_str}</b>\n"
+                f"القطاع والنشاط: <b>{html.escape(sector_and_industry)}</b>\n"
+                f"الدولة: <b>{html.escape(tv_data['country'])}</b>\n"
+                f"تقسيمات سابقه: ( <b>{prior_splits}</b> )\n"
+                f"{mm_line}"
+                f"{bz_line}"
+                f"التغير الحالي ٪+-: <b>{change_pct_str}</b>\n"
+                f"التغير من شمعة التقسيم ٪+-: <b>{split_candle_change_str}</b>\n"
+                f"الشارت: <a href='{tv_url}'>TradingView Chart</a>"
+            )
+            updates.append(info)
+        if updates:
+            header = f"📌 <b>أسهم التقسيم العكسي المؤكد تنفيذها اليوم ({ksa_date_str})</b>\n\n"
+            msg = header + "\n\n───────────────\n\n".join(updates)
+            send_telegram_message(msg)
+            print(f"✅ تم إرسال الأسهم المؤكدة ({len(updates)} أسهم)")
+        else:
+            send_telegram_message(f"📌 <b>أسهم التقسيم العكسي — اليوم ({ksa_date_str})</b>\n\nلا توجد تقسيمات عكسية مؤكدة ومطبقة فعلياً في البورصة حتى الآن.")
+            print("ℹ️ لا توجد تقسيمات مؤكدة اليوم")
+        watchlist[sent_today_key] = True
+    
+    for sym, item_data in list(watchlist.items()):
+        if sym.startswith("sent_today_"):
+            continue
+        snap = get_live_snapshot(sym)
+        if not snap:
+            continue
+        trend = analyze_3m_trend(sym)
+        if trend and trend['direction'] == "up":
+            trend_word = "📈 صاعد قوي"
+        elif trend and trend['direction'] == "down":
+            trend_word = "📉 هابط قوي"
+        else:
+            candles = get_3m_candles(sym, 3)
+            if len(candles) >= 3:
+                c0, c1, c2 = candles[-3]['c'], candles[-2]['c'], candles[-1]['c']
+                if c0 < c1 < c2:
+                    trend_word = "📈 صاعد"
+                elif c0 > c1 > c2:
+                    trend_word = "📉 هابط"
+                else:
+                    trend_word = "➡️ عرضي"
+            else:
+                trend_word = "غير كافٍ"
+        ratio_str = item_data.get("ratio", "")
+        split_open_saved = item_data.get("split_open")
+        activated_at_saved = item_data.get("activated_at", ksa_datetime_str)
+        sec_saved = item_data.get("sector", "غير متوفر")
+        ind_saved = item_data.get("industry", "غير متوفر")
+        cnt_saved = item_data.get("country", "غير متوفر")
+        reason_saved = item_data.get("split_reason", "غير متوفر")
+        
+        card = build_live_card(
+            sym, snap, trend_word, ksa_time_str,
+            ratio_str=ratio_str,
+            split_open=split_open_saved,
+            activated_at=activated_at_saved,
+            sector=sec_saved,
+            industry=ind_saved,
+            country=cnt_saved,
+            split_reason=reason_saved
+        )
+        msg_id = item_data.get("live_msg_id")
+        if msg_id:
+            success = edit_telegram_message(msg_id, card)
+            if not success:
+                new_id = send_telegram_get_id(card)
+                if new_id:
+                    watchlist[sym]["live_msg_id"] = new_id
+        else:
+            new_id = send_telegram_get_id(card)
+            if new_id:
+                watchlist[sym]["live_msg_id"] = new_id
+    print("✅ تم تحديث بطاقات LIVE المباشرة (تقسيم عكسي)")
+    save_watchlist(watchlist, SPLITS_WATCHLIST_FILE)
+    print("🏁 [SPLITS] انتهت الدورة")
+    print("=" * 50)
+
+# ---------------------------------------------------------
+# دوال IPO
+# ---------------------------------------------------------
+def load_ipo_watchlist():
+    if os.path.exists(IPO_WATCHLIST_FILE):
+        try:
+            with open(IPO_WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_ipo_watchlist(watchlist):
+    with open(IPO_WATCHLIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(watchlist, f, ensure_ascii=False, indent=4)
+
+def get_today_ipos():
+    today = get_est_now().date()
+    month_str = today.strftime("%Y-%m")
+    target = today.strftime("%m/%d/%Y")
+    ipos = {}
+    try:
+        url = f"https://api.nasdaq.com/api/ipo/calendar?date={month_str}"
+        res = requests.get(url, headers=NASDAQ_HEADERS, timeout=10)
+        if res.status_code != 200:
+            print(f"❌ Nasdaq IPO status: {res.status_code}")
+            return []
+        data = (res.json() or {}).get('data') or {}
+        priced = ((data.get('priced') or {}).get('rows')) or []
+        upcoming = (((data.get('upcoming') or {}).get('upcomingTable') or {}).get('rows')) or []
+        for rows, date_key, status in ((upcoming, 'expectedPriceDate', 'upcoming'),
+                                       (priced, 'pricedDate', 'priced')):
+            for row in rows:
+                if not row:
+                    continue
+                if str(row.get(date_key, '')).strip() != target:
+                    continue
+                symbol = str(row.get('proposedTickerSymbol', '')).strip().upper()
+                if not symbol:
+                    continue
+                price_raw = str(row.get('proposedSharePrice', '') or '').strip()
+                nums = parse_numbers(price_raw)
+                price_num = (sum(nums) / len(nums)) if nums else 0.0
+                shares_nums = parse_numbers(row.get('sharesOffered', ''))
+                ipos[symbol] = {
+                    'symbol': symbol,
+                    'name': str(row.get('companyName', '') or '').strip(),
+                    'price_raw': price_raw,
+                    'price_num': price_num,
+                    'shares_offered': shares_nums[0] if shares_nums else 0.0,
+                    'cal_status': status
+                }
+    except Exception as e:
+        print("❌ Nasdaq IPO API Error:", e)
+    return list(ipos.values())
+
+REG_A_FORMS = ("253G1", "253G2", "253G3", "253G4", "1-A", "1-A/A", "QUALIF", "1-A POS")
+TRAD_FORMS = ("424B4", "424B1", "424B3", "S-1", "S-1/A", "F-1", "F-1/A")
+
+def sec_find_filings(company_name):
+    if not company_name:
+        return []
+    start = (get_est_now().date() - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
+    end = get_est_now().date().strftime("%Y-%m-%d")
+    params = {
+        "q": f'"{company_name}"',
+        "forms": ",".join(REG_A_FORMS + TRAD_FORMS),
+        "dateRange": "custom", "startdt": start, "enddt": end
+    }
+    try:
+        res = requests.get("https://efts.sec.gov/LATEST/search-index",
+                           params=params, headers=SEC_HEADERS, timeout=20)
+        if res.status_code == 200:
+            return (res.json().get("hits") or {}).get("hits") or []
+    except Exception as e:
+        print(f"SEC search error ({company_name}):", e)
+    return []
+
+def hit_form(hit):
+    src = hit.get("_source", {}) or {}
+    return str(src.get("form") or src.get("file_type") or "").upper()
+
+def hit_url(hit):
+    try:
+        adsh, fname = str(hit.get("_id", "")).split(":", 1)
+        ciks = (hit.get("_source", {}) or {}).get("ciks") or []
+        cik = str(ciks[0]).lstrip("0")
+        return f"https://www.sec.gov/Archives/edgar/data/{cik}/{adsh.replace('-', '')}/{fname}"
+    except Exception:
+        return None
+
+def detect_greenshoe_in_doc(url):
+    try:
+        res = requests.get(url, headers=SEC_HEADERS, timeout=30)
+        if res.status_code != 200:
+            return None
+        text = html.unescape(re.sub(r'<[^>]+>', ' ', res.text[:4_000_000]))
+        text = re.sub(r'\s+', ' ', text)
+        m = re.search(
+            r'option[^.]{0,200}?(?:purchase|buy)[^.]{0,60}?up to\s+([\d,]+)\s+(?:additional\s+)?(?:ordinary\s+|common\s+|class [a-z]\s+)?shares',
+            text, re.I)
+        if m:
+            return f"✅ نعم — حتى {m.group(1)} سهم إضافي"
+        if re.search(r'over-?allotment|greenshoe', text, re.I):
+            return "✅ نعم (الكمية غير مستخرجة)"
+        return "❌ غير مذكور في النشرة"
+    except Exception as e:
+        print("Greenshoe parse error:", e)
+        return None
+
+def analyze_offering(company_name):
+    hits = sec_find_filings(company_name)
+    if not hits:
+        return None, None
+    forms = [hit_form(h) for h in hits]
+    if any(f in REG_A_FORMS for f in forms):
+        return "Regulation A Tier 2", "❌ غير متاح عادةً في Reg A"
+    trad_hits = [h for h in hits if hit_form(h) in TRAD_FORMS]
+    if trad_hits:
+        trad_hits.sort(key=lambda h: 0 if hit_form(h).startswith("424B") else 1)
+        green = None
+        url = hit_url(trad_hits[0])
+        if url:
+            green = detect_greenshoe_in_doc(url)
+        return "IPO تقليدي", green
+    return None, None
+
+def fmt_pct(v):
+    return f"{'+' if v >= 0 else ''}{round(v, 2)}%"
+
+def build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str):
+    tv_url = f"https://www.tradingview.com/chart/?symbol={sym}"
+    price_raw = item.get('price_raw', '')
+    if price_raw:
+        price_disp = price_raw if '$' in price_raw else f"${price_raw}"
+    else:
+        price_disp = "غير معلن"
+    if tv['raw_float'] > 0:
+        float_disp = format_shares_count(tv['raw_float'])
+    elif item.get('shares_offered', 0) > 0:
+        float_disp = f"{format_shares_count(item['shares_offered'])} (المطروحة)"
+    else:
+        float_disp = "غير متوفر"
+    
+    executed = tv['found'] and tv['price'] > 0 and tv['volume'] > 0
+    ipo_price = item.get('price_num', 0.0)
+    if executed:
+        status = "✅ تم التنفيذ (بدأ التداول)"
+        cur_price = f"${round(tv['price'], 4)}"
+        if ipo_price > 0 and item.get('cal_status') == 'priced':
+            chg_str = fmt_pct(((tv['price'] / ipo_price) - 1) * 100)
+        elif ipo_price > 0:
+            chg_str = f"{fmt_pct(((tv['price'] / ipo_price) - 1) * 100)} (مقابل السعر المتوقع)"
+        else:
+            chg_str = "غير متوفر"
+        vol_str = f"{int(tv['volume']):,} سهم"
+    else:
+        status = "⏳ بانتظار التنفيذ"
+        cur_price = "—"
+        chg_str = "—"
+        vol_str = "—"
+    
+    offering_type = item.get('offering_type') or "غير محدد"
+    greenshoe = item.get('greenshoe') or "غير محدد"
+    name_line = f"الشركة: <b>{html.escape(item.get('name', ''))}</b>\n" if item.get('name') else ""
+    
+    return (
+        f"🆕 <b>IPO | ${sym}</b>\n"
+        f"{name_line}"
+        f"تاريخ الاكتتاب: <b>اليوم ({ksa_date_str})</b>\n"
+        f"القطاع: <b>{html.escape(tv['sector'])}</b>\n"
+        f"الصناعة: <b>{html.escape(tv['industry'])}</b>\n"
+        f"الدولة: <b>{html.escape(tv['country'])}</b>\n"
+        f"سعر الاكتتاب المتوقع: <b>{html.escape(price_disp)}</b>\n"
+        f"Free float: <b>{float_disp}</b>\n"
+        f"نوع الطرح: <b>{html.escape(offering_type)}</b>\n"
+        f"خيار الاكتتاب الزائد (Greenshoe): <b>{html.escape(greenshoe)}</b>\n"
+        f"حالة التنفيذ: <b>{status}</b>\n"
+        f"السعر الحالي: <b>{cur_price}</b>\n"
+        f"السعر من التنفيذ ٪+-: <b>{chg_str}</b>\n"
+        f"Vol: <b>{vol_str}</b>\n"
+        f"آخر تحديث: <b>{ksa_time_str} (السعودية)</b>\n"
+        f"الشارت: <a href='{tv_url}'>TradingView</a>"
+    )
+
+def run_ipo_task():
+    print("=" * 50)
+    now_ksa = get_ksa_now()
+    now_est = get_est_now()
+    print(f"🔄 [IPO] بداية الدورة: {now_ksa.strftime('%Y-%m-%d %H:%M:%S')}")
+    today_est_str = now_est.strftime("%Y-%m-%d")
+    ksa_date_str = now_ksa.strftime("%Y-%m-%d")
+    ksa_time_str = now_ksa.strftime("%H:%M")
+    sent_today_key = f"sent_today_{today_est_str}"
+    watchlist = load_ipo_watchlist()
+    cleaned = {}
+    for sym, item in watchlist.items():
+        if sym == sent_today_key:
+            cleaned[sym] = item
+        elif isinstance(item, dict) and item.get("added_date") == today_est_str:
+            cleaned[sym] = item
+    watchlist = cleaned
+    todays = get_today_ipos()
+    
+    if not todays:
+        if not watchlist.get(sent_today_key):
+            send_telegram_get_id(f"📌 <b>أسهم الاكتتاب IPO — اليوم ({ksa_date_str})</b>\n\nلا توجد اكتتابات مجدولة اليوم.")
+            watchlist[sent_today_key] = True
+            print("ℹ️ تم إرسال رسالة عدم وجود اكتتابات (تأكيد الفحص)")
+    else:
+        if sent_today_key in watchlist:
+            del watchlist[sent_today_key]
+        for ipo in todays:
+            sym = ipo['symbol']
+            if sym not in watchlist:
+                watchlist[sym] = {"added_date": today_est_str, "sec_attempts": 0}
+            entry = watchlist[sym]
+            entry['name'] = ipo['name']
+            entry['price_raw'] = ipo['price_raw']
+            entry['price_num'] = ipo['price_num']
+            entry['shares_offered'] = ipo['shares_offered']
+            entry['cal_status'] = ipo['cal_status']
+        for sym, item in list(watchlist.items()):
+            if sym.startswith("sent_today_"):
+                continue
+            if (not item.get('offering_type')) and item.get('sec_attempts', 0) < 5:
+                item['sec_attempts'] = item.get('sec_attempts', 0) + 1
+                otype, green = analyze_offering(item.get('name', ''))
+                if otype:
+                    item['offering_type'] = otype
+                    item['greenshoe'] = green or "غير محدد"
+            tv = get_tradingview_stock_data(sym)
+            if tv['found'] and not tv['is_valid_stock']:
+                continue
+            card = build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str)
+            msg_id = item.get("live_msg_id")
+            if msg_id:
+                if not edit_telegram_message(msg_id, card):
+                    new_id = send_telegram_get_id(card)
+                    if new_id:
+                        watchlist[sym]["live_msg_id"] = new_id
+            else:
+                new_id = send_telegram_get_id(card)
+                if new_id:
+                    watchlist[sym]["live_msg_id"] = new_id
+    save_ipo_watchlist(watchlist)
+    print("🏁 [IPO] انتهت الدورة")
+    print("=" * 50)
+
+# ---------------------------------------------------------
+# التشغيل (دورة واحدة)
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    print("🔄 تم تشغيل البوت المدمج (IPO + Reverse Splits + Liquidity & Diamond Engine) - دورة واحدة")
+    try:
+        run_splits_task()
+        run_ipo_task()
+        print("✅ انتهت الدورة بنجاح")
+    except Exception as e:
+        print(f"❌ حدث خطأ غير متوقع: {e}")
