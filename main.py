@@ -226,8 +226,8 @@ def analyze_liquidity_and_diamond(ticker):
                 h = highs[i]
                 if h is not None:
                     result["has_black_candle"] = True
-                    result["black_high"] = h
-                    black_highs.append(h)
+                    result["black_high"] = round(float(h), 2)
+                    black_highs.append(round(float(h), 2))
                     result["volume_ratio"] = round(curr_vol / avg_vol, 1)
         
         if black_highs:
@@ -629,21 +629,6 @@ def evaluate_mm_criteria(ticker, factor, post_split_float, prior_splits, unsched
         matched.append("غير مجدول (غير معلن بتقويم Nasdaq)")
     return matched
 
-def get_split_candle_open(ticker):
-    try:
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-               f"?interval=1m&range=1d&includePrePost=true")
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()
-        r = res['chart']['result'][0]
-        q = r['indicators']['quote'][0]
-        opens = q.get('open', [])
-        for o in opens:
-            if o is not None and o > 0:
-                return float(o)
-    except Exception as e:
-        print(f"Split candle open error ({ticker}):", e)
-    return None
-
 def get_3m_candles(ticker, limit=9):
     try:
         url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -748,8 +733,8 @@ def get_live_snapshot(ticker):
         print(f"Live snapshot error ({ticker}):", e)
         return None
 
-# --- بطاقات LIVE فقط (شمعة السيولة السوداء + إشارة الدايموند) ---
-def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_open=None, activated_at="", sector="غير متوفر", industry="غير متوفر", country="غير متوفر", split_reason="غير متوفر"):
+# --- بطاقات LIVE (مع تعديل حساب التغير من شمعة الافتتاح وتنسيق إشارات السيولة والدايموند) ---
+def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", activated_at="", sector="غير متوفر", industry="غير متوفر", country="غير متوفر", split_reason="غير متوفر"):
     tv_url = f"https://www.tradingview.com/chart/?symbol={sym}"
     session = snap.get('session', 'REG')
     if session == "PRE":
@@ -760,11 +745,11 @@ def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_ope
         status = "🟢 مفتوح (الجلسة الرسمية)"
     
     if snap['open'] and snap['open'] > 0:
-        open_str = f"${round(snap['open'], 4)}"
+        open_str = f"${round(snap['open'], 2)}"
         base = snap['base_price'] or snap['open']
         chg = ((snap['last'] / base) - 1) * 100 if base > 0 else 0.0
         chg_str = f"{'+' if chg >= 0 else ''}{round(chg, 2)}%"
-        hl_str = f"${round(snap['high'], 4)} / ${round(snap['low'], 4)}"
+        hl_str = f"${round(snap['high'], 2)} / ${round(snap['low'], 2)}"
         vol_val = snap.get('vol', 0)
         vol_str = f"{int(vol_val):,} سهم" if vol_val > 0 else "—"
     else:
@@ -773,23 +758,25 @@ def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_ope
         hl_str = "—"
         vol_str = "—"
     
-    if split_open and split_open > 0 and snap.get('last') and snap['last'] > 0:
-        split_chg = ((snap['last'] - split_open) / split_open) * 100
+    effective_open = snap.get('open') if (snap and snap.get('open') and snap['open'] > 0) else 0.0
+    if effective_open > 0 and snap.get('last') and snap['last'] > 0:
+        split_chg = ((snap['last'] - effective_open) / effective_open) * 100
         split_chg_line = f"التغير من شمعة التقسيم ٪+-: <b>{'+' if split_chg >= 0 else ''}{round(split_chg, 2)}%</b>\n"
     else:
         split_chg_line = ""
     
-    # إعدادات السيولة السوداء والدايموند تظهر فقط في بطاقة التحديث الحي
     liq_info = analyze_liquidity_and_diamond(sym)
+    b_high_str = f"${round(liq_info['black_high'], 2)}" if liq_info['black_high'] > 0 else "—"
+    
     if liq_info["has_black_candle"]:
-        black_line = f"⬛ شمعة السيولة السوداء: <b>تم الرصد (فوليوم {liq_info['volume_ratio']}x | هاي: ${liq_info['black_high']})</b>\n"
+        black_line = f"⬛ شمعة السيولة السوداء: <b>تم الرصد (فوليوم {liq_info['volume_ratio']}x | هاي: {b_high_str})</b>\n"
     else:
         black_line = "⬛ شمعة السيولة السوداء: <b>قيد المراقبة (بانتظار تدفق السيولة)</b>\n"
 
     if liq_info["diamond_breakout"]:
-        diamond_line = f"💎 إشارة دايموند: <b>✨ تم الاختراق الإيجابي فوق ${liq_info['black_high']}</b>\n"
+        diamond_line = f"💎 إشارة دايموند: <b>✨ تم الاختراق الإيجابي فوق {b_high_str}</b>\n"
     else:
-        diamond_line = "💎 إشارة دايموند: <b>⏳ بانتظار اختراق الـ High</b>\n"
+        diamond_line = f"💎 إشارة دايموند: <b>⏳ بانتظار اختراق الـ High ({b_high_str})</b>\n"
 
     ratio_line = f"نسبة التقسيم : <b>{html.escape(ratio_str)}</b>\n" if ratio_str else ""
     reason_line = f"سبب التقسيم وإعادة الهيكلة: <b>{html.escape(split_reason)}</b>\n"
@@ -809,7 +796,7 @@ def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", split_ope
         f"{diamond_line}"
         f"─────────────────\n"
         f"بداية الجلسة: <b>{open_str}</b>\n"
-        f"السعر الآن: <b>${round(snap['last'], 4)}</b>\n"
+        f"السعر الآن: <b>${round(snap['last'], 2)}</b>\n"
         f"التغير للجلسة: <b>{chg_str}</b>\n"
         f"{split_chg_line}"
         f"الاتجاه (9 شموع / 3د): <b>{trend_word}</b>\n"
@@ -852,8 +839,11 @@ def run_splits_task():
                 continue
             current_price = tv_data['price']
             change_pct = tv_data['change_pct']
-            price_curr_display = f"${round(current_price, 4)}"
-            split_open = get_split_candle_open(symbol) or current_price
+            price_curr_display = f"${round(current_price, 2)}"
+            
+            snap_temp = get_live_snapshot(symbol)
+            split_open = (snap_temp.get('open') if snap_temp and snap_temp.get('open') else current_price)
+
             if split_open and split_open > 0 and current_price > 0:
                 split_chg = ((current_price - split_open) / split_open) * 100
                 split_candle_change_str = f"{'+' if split_chg >= 0 else ''}{round(split_chg, 2)}%"
@@ -865,12 +855,16 @@ def run_splits_task():
             watchlist[symbol] = {
                 "added_date": today_est_str,
                 "ratio": item['raw_text'],
-                "split_open": split_open,
                 "activated_at": ksa_datetime_str,
                 "sector": tv_data['sector'],
                 "industry": tv_data['industry'],
                 "country": tv_data['country'],
-                "split_reason": split_reason
+                "split_reason": split_reason,
+                "last_price": current_price,
+                "last_news_title": "",
+                "last_black_candle": False,
+                "last_diamond": False,
+                "active_updates_count": 0
             }
             base_shares = resolve_post_split_float(
                 symbol, get_base_shares(tv_data, current_price), item.get('factor', 1.0)
@@ -883,6 +877,8 @@ def run_splits_task():
             bz = get_benzinga_split_news(symbol)
             bz_line = (f"Benzinga: <a href='{html.escape(bz['link'])}'>{html.escape(bz['title'])}</a>\n"
                        if bz else "Benzinga: <b>لا يوجد خبر</b>\n")
+            if bz:
+                watchlist[symbol]["last_news_title"] = bz['title']
             
             ratio_ar = format_ratio_ar(num, den, item['raw_text'])
             sector_and_industry = f"{tv_data['sector']} / {tv_data['industry']}"
@@ -917,62 +913,99 @@ def run_splits_task():
             print("ℹ️ لا توجد تقسيمات مؤكدة اليوم")
         watchlist[sent_today_key] = True
     
+    # تحديث البطاقات بذكاء وشروط (ارتفاع سعر، أخبار جديدة، ظهور شمعة السيولة، أو ظهور الدايموند)
     for sym, item_data in list(watchlist.items()):
         if sym.startswith("sent_today_"):
             continue
         snap = get_live_snapshot(sym)
         if not snap:
             continue
-        trend = analyze_3m_trend(sym)
-        if trend and trend['direction'] == "up":
-            trend_word = "📈 صاعد قوي"
-        elif trend and trend['direction'] == "down":
-            trend_word = "📉 هابط قوي"
-        else:
-            candles = get_3m_candles(sym, 3)
-            if len(candles) >= 3:
-                c0, c1, c2 = candles[-3]['c'], candles[-2]['c'], candles[-1]['c']
-                if c0 < c1 < c2:
-                    trend_word = "📈 صاعد"
-                elif c0 > c1 > c2:
-                    trend_word = "📉 هابط"
-                else:
-                    trend_word = "➡️ عرضي"
-            else:
-                trend_word = "غير كافٍ"
-        ratio_str = item_data.get("ratio", "")
-        split_open_saved = item_data.get("split_open")
-        activated_at_saved = item_data.get("activated_at", ksa_datetime_str)
-        sec_saved = item_data.get("sector", "غير متوفر")
-        ind_saved = item_data.get("industry", "غير متوفر")
-        cnt_saved = item_data.get("country", "غير متوفر")
-        reason_saved = item_data.get("split_reason", "غير متوفر")
         
-        card = build_live_card(
-            sym, snap, trend_word, ksa_time_str,
-            ratio_str=ratio_str,
-            split_open=split_open_saved,
-            activated_at=activated_at_saved,
-            sector=sec_saved,
-            industry=ind_saved,
-            country=cnt_saved,
-            split_reason=reason_saved
-        )
-        msg_id = item_data.get("live_msg_id")
-        if msg_id:
-            success = edit_telegram_message(msg_id, card)
-            if not success:
+        current_price = snap['last']
+        last_price = item_data.get("last_price", current_price)
+        
+        # تحليل السيولة والدايموند للحصول على الحالات الحالية
+        liq_info = analyze_liquidity_and_diamond(sym)
+        current_black_candle = liq_info["has_black_candle"]
+        last_black_candle = item_data.get("last_black_candle", False)
+        
+        current_diamond = liq_info["diamond_breakout"]
+        last_diamond = item_data.get("last_diamond", False)
+        
+        # فحص وجود خبر جديد
+        bz = get_benzinga_split_news(sym)
+        current_news_title = bz['title'] if bz else ""
+        last_news_title = item_data.get("last_news_title", "")
+        
+        active_count = item_data.get("active_updates_count", 0)
+        
+        # الشروط الذكية لتحديث البطاقة
+        price_increased = current_price > last_price
+        has_new_news = (current_news_title != "" and current_news_title != last_news_title)
+        is_initial_phase = active_count < 6
+        black_candle_appeared = (current_black_candle and not last_black_candle)
+        diamond_appeared = (current_diamond and not last_diamond)
+        
+        if is_initial_phase or price_increased or has_new_news or black_candle_appeared or diamond_appeared:
+            trend = analyze_3m_trend(sym)
+            if trend and trend['direction'] == "up":
+                trend_word = "📈 صاعد قوي"
+            elif trend and trend['direction'] == "down":
+                trend_word = "📉 هابط قوي"
+            else:
+                candles = get_3m_candles(sym, 3)
+                if len(candles) >= 3:
+                    c0, c1, c2 = candles[-3]['c'], candles[-2]['c'], candles[-1]['c']
+                    if c0 < c1 < c2:
+                        trend_word = "📈 صاعد"
+                    elif c0 > c1 > c2:
+                        trend_word = "📉 هابط"
+                    else:
+                        trend_word = "➡️ عرضي"
+                else:
+                    trend_word = "غير كافٍ"
+            
+            ratio_str = item_data.get("ratio", "")
+            activated_at_saved = item_data.get("activated_at", ksa_datetime_str)
+            sec_saved = item_data.get("sector", "غير متوفر")
+            ind_saved = item_data.get("industry", "غير متوفر")
+            cnt_saved = item_data.get("country", "غير متوفر")
+            reason_saved = item_data.get("split_reason", "غير متوفر")
+            
+            card = build_live_card(
+                sym, snap, trend_word, ksa_time_str,
+                ratio_str=ratio_str,
+                activated_at=activated_at_saved,
+                sector=sec_saved,
+                industry=ind_saved,
+                country=cnt_saved,
+                split_reason=reason_saved
+            )
+            msg_id = item_data.get("live_msg_id")
+            if msg_id:
+                success = edit_telegram_message(msg_id, card)
+                if not success:
+                    new_id = send_telegram_get_id(card)
+                    if new_id:
+                        watchlist[sym]["live_msg_id"] = new_id
+            else:
                 new_id = send_telegram_get_id(card)
                 if new_id:
                     watchlist[sym]["live_msg_id"] = new_id
+            
+            # تحديث الحالة المخزنة
+            watchlist[sym]["last_price"] = current_price
+            if current_news_title:
+                watchlist[sym]["last_news_title"] = current_news_title
+            watchlist[sym]["last_black_candle"] = current_black_candle
+            watchlist[sym]["last_diamond"] = current_diamond
+            watchlist[sym]["active_updates_count"] = active_count + 1
+            print(f"🔄 تم تحديث بطاقة LIVE للسهم {sym}")
         else:
-            new_id = send_telegram_get_id(card)
-            if new_id:
-                watchlist[sym]["live_msg_id"] = new_id
-    print("✅ تم تحديث بطاقات LIVE المباشرة (تقسيم عكسي)")
+            print(f"ℹ️ السهم {sym} مستقر ولا توجد أحداث جديدة — تخطي التحديث")
+
+    print("✅ انتهت دورة التقسيم العكسي")
     save_watchlist(watchlist, SPLITS_WATCHLIST_FILE)
-    print("🏁 [SPLITS] انتهت الدورة")
-    print("=" * 50)
 
 # ---------------------------------------------------------
 # دوال IPO
@@ -992,11 +1025,11 @@ def save_ipo_watchlist(watchlist):
 
 def get_today_ipos():
     today = get_est_now().date()
-    month_str = today.strftime("%Y-%m")
+    month_str = today.strftime("%Y-%m-%d")
     target = today.strftime("%m/%d/%Y")
     ipos = {}
     try:
-        url = f"https://api.nasdaq.com/api/ipo/calendar?date={month_str}"
+        url = f"https://api.nasdaq.com/api/ipo/calendar?date={today.strftime('%Y-%m')}"
         res = requests.get(url, headers=NASDAQ_HEADERS, timeout=10)
         if res.status_code != 200:
             print(f"❌ Nasdaq IPO status: {res.status_code}")
@@ -1122,7 +1155,7 @@ def build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str):
     ipo_price = item.get('price_num', 0.0)
     if executed:
         status = "✅ تم التنفيذ (بدأ التداول)"
-        cur_price = f"${round(tv['price'], 4)}"
+        cur_price = f"${round(tv['price'], 2)}"
         if ipo_price > 0 and item.get('cal_status') == 'priced':
             chg_str = fmt_pct(((tv['price'] / ipo_price) - 1) * 100)
         elif ipo_price > 0:
@@ -1189,7 +1222,7 @@ def run_ipo_task():
         for ipo in todays:
             sym = ipo['symbol']
             if sym not in watchlist:
-                watchlist[sym] = {"added_date": today_est_str, "sec_attempts": 0}
+                watchlist[sym] = {"added_date": today_est_str, "sec_attempts": 0, "last_price": 0.0, "active_updates_count": 0}
             entry = watchlist[sym]
             entry['name'] = ipo['name']
             entry['price_raw'] = ipo['price_raw']
@@ -1208,29 +1241,44 @@ def run_ipo_task():
             tv = get_tradingview_stock_data(sym)
             if tv['found'] and not tv['is_valid_stock']:
                 continue
-            card = build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str)
-            msg_id = item.get("live_msg_id")
-            if msg_id:
-                if not edit_telegram_message(msg_id, card):
+            
+            current_price = tv['price']
+            last_price = item.get("last_price", current_price)
+            active_count = item.get("active_updates_count", 0)
+            
+            price_increased = current_price > last_price
+            is_initial_phase = active_count < 6
+            
+            if is_initial_phase or price_increased:
+                card = build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str)
+                msg_id = item.get("live_msg_id")
+                if msg_id:
+                    if not edit_telegram_message(msg_id, card):
+                        new_id = send_telegram_get_id(card)
+                        if new_id:
+                            watchlist[sym]["live_msg_id"] = new_id
+                else:
                     new_id = send_telegram_get_id(card)
                     if new_id:
                         watchlist[sym]["live_msg_id"] = new_id
-            else:
-                new_id = send_telegram_get_id(card)
-                if new_id:
-                    watchlist[sym]["live_msg_id"] = new_id
+                
+                watchlist[sym]["last_price"] = current_price
+                watchlist[sym]["active_updates_count"] = active_count + 1
     save_ipo_watchlist(watchlist)
     print("🏁 [IPO] انتهت الدورة")
     print("=" * 50)
 
 # ---------------------------------------------------------
-# التشغيل (دورة واحدة)
+# التشغيل المستمر (كل 5 دقائق)
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    print("🔄 تم تشغيل البوت المدمج (IPO + Reverse Splits + Liquidity & Diamond Engine) - دورة واحدة")
-    try:
-        run_splits_task()
-        run_ipo_task()
-        print("✅ انتهت الدورة بنجاح")
-    except Exception as e:
-        print(f"❌ حدث خطأ غير متوقع: {e}")
+    print("🔄 تم تشغيل البوت المدمج (IPO + Reverse Splits + Liquidity & Diamond Engine) - تحديث ذكي كل 5 دقائق")
+    while True:
+        try:
+            run_splits_task()
+            run_ipo_task()
+            print("✅ انتهت الدورة بنجاح. الانتظار لمدة 5 دقائق للدورة القادمة...")
+        except Exception as e:
+            print(f"❌ حدث خطأ غير متوقع: {e}")
+        
+        time.sleep(300)
