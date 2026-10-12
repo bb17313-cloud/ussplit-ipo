@@ -1,10 +1,10 @@
-Name: Stock Bot (IPO + Reverse Splits)
+name: Stock Bot (IPO + Reverse Splits)
 
 on:
   schedule:
-    # تشغيل كل 5 دقائق خلال ساعات السوق الأمريكي والتداول الممتد (Pre-market, Regular, After-hours)
+    # تشغيل كل 5 دقائق خلال ساعات السوق والتداول الممتد لجميع الجلسات
     - cron: '*/5 8-23 * * 1-5'   # الإثنين–الجمعة من 8:00 إلى 23:50 UTC
-    - cron: '*/5 0 * * 2-6'      # منتصف الليل UTC أيام الثلاثاء–السبت (تغطية نهاية After-Hours)
+    - cron: '*/5 0 * * 2-6'      # منتصف الليل UTC أيام الثلاثاء–السبت
 
   workflow_dispatch:  # تشغيل يدوي
 
