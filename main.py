@@ -4,1326 +4,244 @@ import json
 import datetime
 import time
 import re
-import html
+import random
 import requests
+from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# إعدادات التليجرام
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
-# ملفات المراقبة المنفصلة
-SPLITS_WATCHLIST_FILE = "splits_watchlist.json"
-IPO_WATCHLIST_FILE = "ipo_watchlist.json"
-PRESPLIT_FILE = "presplit_floats.json"
+# ملف الذاكرة لمنع التكرار وحفظ الأسهم المراقبة اليومية
+CACHE_FILE = "market_tracker_cache.json"
 
-# SEC & Common Headers
-SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "StockBot your-email@example.com")
-SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
+# قائمة البروكسيات الخاصة بك (أدرج البروكسيات هنا بصيغة IP:Port أو User:Pass@IP:Port)
+# الكود مبرمج لاختيار بروكسي عشوائي عند كل طلب لمنع حظر السيرفر
+PROXIES_POOL = [
+    "http://username:password@proxy_ip1:port",
+    "http://username:password@proxy_ip2:port",
+    "http://username:password@proxy_ip3:port",
+    # أضف المزيد من البروكسيات هنا...
+]
 
 COMMON_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9"
-}
-
-NASDAQ_HEADERS = {
-    **COMMON_HEADERS,
-    "Origin": "https://www.nasdaq.com",
-    "Referer": "https://www.nasdaq.com/market-activity/stock-splits",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site"
-}
-
-SECTOR_MAP = {
-    "Health Technology": "الرعاية الصحية - تكنولوجيا",
-    "Health Services": "الخدمات الصحية",
-    "Commercial Services": "الخدمات التجارية",
-    "Consumer Durables": "السلع الاستهلاكية المعمرة",
-    "Consumer Non-Durables": "السلع الاستهلاكية غير المعمرة",
-    "Consumer Services": "الخدمات الاستهلاكية",
-    "Electronic Technology": "التكنولوجيا الإلكترونية",
-    "Technology Services": "خدمات التكنولوجيا",
-    "Finance": "الخدمات المالية",
-    "Energy Minerals": "معادن الطاقة",
-    "Non-Energy Minerals": "المعادن غير الطاقية",
-    "Process Industries": "الصناعات التحويلية",
-    "Producer Manufacturing": "التصنيع الإنتاجي",
-    "Industrial Services": "الخدمات الصناعية",
-    "Utilities": "المرافق العامة",
-    "Retail Trade": "تجارة التجزئة",
-    "Transportation": "النقل والمواصلات",
-    "Communications": "الاتصالات",
-    "Distribution Services": "خدمات التوزيع"
-}
-
-INDUSTRY_MAP = {
-    "Software - Infrastructure": "البرمجيات - البنية التحتية",
-    "Software - Application": "البرمجيات - التطبيقات",
-    "Biotechnology": "التكنولوجيا الحيوية",
-    "Medical Specialties": "التخصصات الطبية",
-    "Pharmaceuticals: Major": "صناعة الأدوية - الكبرى",
-    "Pharmaceuticals: Generic": "صناعة الأدوية - العامة",
-    "Wholesale Distributors": "موزعو الجملة",
-    "Auto Parts: OEM": "قطع غيار السيارات",
-    "Motor Vehicles": "صناعة السيارات",
-    "Industrial Machinery": "الآلات الصناعية",
-    "Aerospace & Defense": "الفضاء والدفاع",
-    "Semiconductors": "أشباه الموصلات",
-    "Internet Software/Services": "برمجيات وخدمات الإنترنت",
-    "Real Estate Development": "التطوير العقاري",
-    "Financial Publishing/Services": "الخدمات المالية",
-    "Engineering & Construction": "الهندسة والإنشاءات"
-}
-
-COUNTRY_MAP = {
-    "US": "الولايات المتحدة", "USA": "الولايات المتحدة", "United States": "الولايات المتحدة",
-    "CA": "كندا", "Canada": "كندا", "CN": "الصين", "China": "الصين",
-    "IL": "إسرائيل", "Israel": "إسرائيل", "KY": "جزر كايمان", "Cayman Islands": "جزر كايمان",
-    "BM": "برمودا", "Bermuda": "برمودا", "GB": "المملكة المتحدة", "United Kingdom": "المملكة المتحدة",
-    "HK": "هونغ كونغ", "Hong Kong": "هونغ كونغ", "SG": "سنغافورة", "Singapore": "سنغافورة",
-    "JP": "اليابان", "Japan": "اليابان", "DE": "ألمانيا", "Germany": "ألمانيا",
-    "FR": "فرنسا", "France": "فرنسا", "AU": "أستراليا", "Australia": "أستراليا",
-    "IE": "أيرلندا", "Ireland": "أيرلندا", "CH": "سويسرا", "Switzerland": "سويسرا",
-    "NL": "هولندا", "Netherlands": "هولندا", "SE": "السويد", "Sweden": "السويد",
-    "GR": "اليونان", "Greece": "اليونان", "KR": "كوريا الجنوبية", "South Korea": "كوريا الجنوبية"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 # ---------------------------------------------------------
-# أدوات عامة مشتركة
+# محرك إدارة البروكسي والطلبات
+# ---------------------------------------------------------
+def get_proxy():
+    """يختار بروكسي عشوائياً من القائمة إذا كانت متوفرة"""
+    if PROXIES_POOL and PROXIES_POOL[0] != "http://username:password@proxy_ip1:port":
+        p = random.choice(PROXIES_POOL)
+        return {"http": p, "https": p}
+    return None
+
+def make_request(url, headers=COMMON_HEADERS):
+    """يرسل الطلب مع حماية من الأخطاء وتدوير البروكسيات"""
+    proxies = get_proxy()
+    try:
+        res = requests.get(url, headers=headers, proxies=proxies, timeout=12)
+        if res.ok:
+            return res
+    except Exception as e:
+        print(f"⚠️ خطأ اتصال عبر البروكسي بالرابط {url}: {e}")
+    return None
+
+# ---------------------------------------------------------
+# التوقيت والجلسات (توقيت نيويورك EST)
 # ---------------------------------------------------------
 def get_est_now():
     return datetime.datetime.now(ZoneInfo("America/New_York"))
 
-def get_ksa_now():
-    return datetime.datetime.now(ZoneInfo("Asia/Riyadh"))
+def get_market_session():
+    """
+    يحدد الجلسة الحالية بدقة بناءً على توقيت وول ستريت:
+    - Pre-Market: من 4:00 صباحاً إلى 9:30 صباحاً
+    - Regular Market: من 9:30 صباحاً إلى 4:00 مساءً
+    - Post-Market: من 4:00 مساءً إلى 8:00 مساءً
+    """
+    now = get_est_now()
+    if now.weekday() >= 5: # عطلة نهاية الأسبوع
+        return "CLOSED"
+        
+    t = now.time()
+    if datetime.time(4, 0) <= t < datetime.time(9, 30):
+        return "PRE_MARKET"
+    elif datetime.time(9, 30) <= t < datetime.time(16, 0):
+        return "REGULAR"
+    elif datetime.time(16, 0) <= t < datetime.time(20, 0):
+        return "POST_MARKET"
+    return "CLOSED"
 
-def is_market_active():
-    now_est = get_est_now()
-    if now_est.weekday() >= 5:
-        return False
-    return 4 <= now_est.hour < 20
-
-def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID غير موجود")
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=15)
-        if res.ok:
-            print("✅ تم إرسال الرسالة بنجاح")
-            return True
-        else:
-            print(f"❌ Telegram Error: {res.status_code} - {res.text}")
-            clean_text = re.sub(r'<[^>]+>', '', message)
-            res_retry = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": clean_text}, timeout=15)
-            return res_retry.ok
-    except Exception as e:
-        print("❌ استثناء التليجرام:", e)
-        return False
-
-def send_telegram_get_id(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return None
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=15)
-        if res.ok:
-            return res.json()['result']['message_id']
-    except Exception as e:
-        print("❌ send_telegram_get_id:", e)
-    return None
-
-def edit_telegram_message(message_id, message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "message_id": message_id,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=15)
-        return res.ok
-    except Exception as e:
-        print("❌ edit_telegram_message:", e)
-        return False
-
-def parse_numbers(s):
-    out = []
-    for x in re.findall(r'\d[\d,]*\.?\d*', str(s or '')):
+# ---------------------------------------------------------
+# إدارة الذاكرة ومنع التكرار (State Management)
+# ---------------------------------------------------------
+def load_cache():
+    if os.path.exists(CACHE_FILE):
         try:
-            out.append(float(x.replace(',', '')))
-        except (ValueError, TypeError):
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except:
             pass
-    return out
+    return {"date": "", "morning_sent": False, "tracked_tickers": [], "last_prices": {}}
 
-def format_shares_count(num):
-    if not num or num <= 0:
-        return "غير متوفر"
-    num = float(num)
-    if num >= 995_000:
-        millions = round(num / 1_000_000, 2)
-        val_str = f"{int(millions)}" if millions.is_integer() else f"{millions}"
-        return f"{val_str} مليون سهم"
-    elif num >= 1_000:
-        thousands = round(num / 1_000, 2)
-        val_str = f"{int(thousands)}" if thousands.is_integer() else f"{thousands}"
-        return f"{val_str} ألف سهم"
-    return f"{int(round(num))} سهم"
+def save_cache(cache_data):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache_data, f, indent=4)
 
 # ---------------------------------------------------------
-# محلل شمعة السيولة السوداء وإشارات الدايموند
+# جلب البيانات والتحليل
 # ---------------------------------------------------------
-def analyze_liquidity_and_diamond(ticker):
-    result = {
-        "has_black_candle": False,
-        "black_high": 0.0,
-        "diamond_breakout": False,
-        "volume_ratio": 1.0
-    }
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d&includePrePost=true"
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()
-        r = res.get('chart', {}).get('result', [])
-        if not r:
-            return result
+def parse_numbers(s):
+    return [float(x.replace(',', '')) for x in re.findall(r'\d[\d,]*\.?\d*', str(s or '')) if x]
+
+def scrape_nasdaq_splits():
+    """كشط صفحة التقسيمات لاستخراج الرموز التي يطبق عليها تقسيم عكسي اليوم"""
+    url = "https://www.nasdaq.com/market-activity/stock-splits"
+    today_str = get_est_now().strftime("%Y-%m-%d")
+    tickers = []
+    
+    res = make_request(url)
+    if not res:
+        return tickers
         
-        q = r[0].get('indicators', {}).get('quote', [{}])[0]
-        highs = q.get('high', [])
-        closes = q.get('close', [])
-        volumes = q.get('volume', [])
-        
-        if len(closes) < 10:
-            return result
-        
-        lookback = min(20, len(closes) - 3)
-        black_highs = []
-        for i in range(max(5, lookback), len(closes)):
-            vol_slice = [v for v in volumes[max(0, i-20):i] if v is not None and v > 0]
-            if not vol_slice:
-                continue
-            avg_vol = sum(vol_slice) / len(vol_slice)
-            curr_vol = volumes[i] or 0.0
+    soup = BeautifulSoup(res.text, "html.parser")
+    for row in soup.find_all("tr"):
+        cells = row.find_all(["td", "th"])
+        if len(cells) < 4:
+            continue
+        try:
+            ticker = cells[0].get_text(strip=True)
+            ratio_str = cells[2].get_text(strip=True)
+            exec_date = cells[3].get_text(strip=True)
             
-            if avg_vol > 0 and curr_vol >= avg_vol * 1.8:
-                h = highs[i]
-                if h is not None:
-                    result["has_black_candle"] = True
-                    result["black_high"] = round(float(h), 2)
-                    black_highs.append(round(float(h), 2))
-                    result["volume_ratio"] = round(curr_vol / avg_vol, 1)
-        
-        if black_highs:
-            last_blk_high = black_highs[-1]
-            current_price = closes[-1]
-            result["black_high"] = last_blk_high
-            if current_price >= last_blk_high:
-                result["diamond_breakout"] = True
-
-    except Exception as e:
-        print(f"⚠️ خطأ في تحليل السيولة والدايموند لـ {ticker}: {e}")
-    
-    return result
-
-# ---------------------------------------------------------
-# استخراج سبب التقسيم العكسي
-# ---------------------------------------------------------
-def get_split_reason_ar(ticker):
-    try:
-        url = f"https://efts.sec.gov/LATEST/search-index"
-        params = {"q": f'"{ticker}" "reverse split"', "forms": "8-K,6-K", "dateRange": "custom",
-                  "startdt": (get_est_now().date() - datetime.timedelta(days=90)).strftime("%Y-%m-%d"),
-                  "enddt": get_est_now().date().strftime("%Y-%m-%d")}
-        res = requests.get(url, params=params, headers=SEC_HEADERS, timeout=10)
-        text_content = ""
-        if res.status_code == 200:
-            hits = (res.json().get("hits") or {}).get("hits") or []
-            if hits:
-                text_content = str(hits[0].get("_source", {}).get("display_names", ""))
-        
-        text_lower = text_content.lower()
-        if "asset sale" in text_lower or "divestiture" in text_lower or "sale of assets" in text_lower:
-            return "إعادة هيكلة أصول (بيع/تصفية قطاعات تابعة)"
-        elif "compliance" in text_lower or "minimum bid" in text_lower or "deficiency" in text_lower:
-            return "إعادة هيكلة رأس المال (لاستيفاء شرط الحد الأدنى لسعر السهم بالبورصة)"
-        elif "debt" in text_lower or "restructuring agreement" in text_lower or "chapter 11" in text_lower:
-            return "إعادة هيكلة ديون وتغيير التزامات مالية"
-        elif "merger" in text_lower or "acquisition" in text_lower:
-            return "إعادة هيكلة شاملة (اندماج واستحواذ)"
-        else:
-            return "إعادة هيكلة رأس المال (لرفع سعر السهم السوقي وتفادي الحذف)"
-    except Exception as e:
-        print(f"⚠️ خطأ في استخراج سبب التقسيم لـ {ticker}: {e}")
-        return "إعادة هيكلة رأس المال (لتعديل القيمة السوقية والسعر)"
-
-def get_benzinga_split_news(ticker):
-    try:
-        import xml.etree.ElementTree as ET
-        from urllib.parse import quote
-        q = quote(f'"{ticker}" "reverse stock split" site:benzinga.com when:1d')
-        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=10)
-        if res.status_code != 200:
-            return None
-        root = ET.fromstring(res.content)
-        for it in root.iter("item"):
-            title = (it.findtext("title") or "").strip()
-            link = (it.findtext("link") or "").strip()
-            if title and link:
-                return {"title": title, "link": link}
-    except Exception as e:
-        print(f"Benzinga news error ({ticker}): {e}")
-    return None
-
-# ---------------------------------------------------------
-# دوال التقسيم العكسي (Reverse Splits)
-# ---------------------------------------------------------
-def load_watchlist(file_path=SPLITS_WATCHLIST_FILE):
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            if today_str in exec_date or exec_date == today_str:
+                nums = parse_numbers(ratio_str)
+                if len(nums) == 2 and nums[0] < nums[1]: # شرط التقسيم العكسي (1:10 مثلاً)
+                    if ticker and ticker not in tickers:
+                        tickers.append(ticker)
         except Exception:
-            return {}
-    return {}
-
-def save_watchlist(watchlist, file_path=SPLITS_WATCHLIST_FILE):
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(watchlist, f, ensure_ascii=False, indent=4)
-
-def extract_ratio_numbers(ratio_str):
-    ratio_str = str(ratio_str).lower().strip()
-    match = re.search(
-        r'(\d+(?:\.\d+)?)\s*(?:-?\s*for\s*-?|:|-|to|\/)\s*(\d+(?:\.\d+)?)',
-        ratio_str)
-    if match:
-        return float(match.group(1)), float(match.group(2))
-    return None, None
-
-def is_reverse_split(num, den, ratio_str=""):
-    if num is None or den is None:
-        s = str(ratio_str).lower()
-        return "reverse" in s or "consolidation" in s
-    if num < den and den / num >= 1.5:
-        return True
-    s = str(ratio_str).lower()
-    if "reverse" in s or "consolidation" in s:
-        return True
-    return False
-
-def format_ratio_ar(num, den, raw_str=""):
-    if num and den and num > 0 and den > 0:
-        factor = max(num, den) / min(num, den)
-        return f"1 : {int(factor) if factor == int(factor) else round(factor, 2)}"
-    return raw_str or "تقسيم عكسي"
-
-def parse_nasdaq_execution_date(date_str):
-    """تحويل تاريخ Nasdaq إلى date object"""
-    if not date_str:
-        return None
-    date_str = str(date_str).strip()
-    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
-        try:
-            return datetime.datetime.strptime(date_str, fmt).date()
-        except ValueError:
             continue
-    return None
+    return tickers
 
-def verify_actual_execution(ticker, num, den):
-    """تأكيد أن التقسيم العكسي ساري المفعول اليوم فعلاً عبر Yahoo events"""
-    if not num or not den:
-        return False, 1.0, 0.0, 0.0
-    factor = max(num, den) / min(num, den)
-    today_est = get_est_now().date()
-    try:
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-               f"?events=splits&interval=1d&range=5d")
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()
-        result = res.get('chart', {}).get('result', [])
-        if not result:
-            return False, factor, 0.0, 0.0
-
-        splits = (result[0].get('events') or {}).get('splits', {})
-        found_today = False
-        for s in splits.values():
-            n = s.get('numerator')
-            d_ = s.get('denominator')
-            sdate = s.get('date')
-            if not n or not d_ or sdate is None:
-                continue
-            s_day = datetime.datetime.fromtimestamp(sdate, ZoneInfo("America/New_York")).date()
-            if n < d_ and s_day == today_est:
-                found_today = True
-                factor = float(d_) / float(n)
-                break
-
-        if not found_today:
-            return False, factor, 0.0, 0.0
-
-        meta = result[0].get('meta', {})
-        prev_close = meta.get('previousClose') or meta.get('chartPreviousClose') or 0.0
-        current_price = (meta.get('regularMarketPrice') or
-                         meta.get('preMarketPrice') or
-                         meta.get('postMarketPrice') or 0.0)
-        return True, factor, current_price, prev_close
-    except Exception as e:
-        print(f"⚠️ خطأ أثناء التحقق لـ {ticker}: {e}")
-        return False, factor, 0.0, 0.0
-
-def get_today_reverse_splits():
-    today_est = get_est_now().date()
-    date_str = today_est.strftime("%Y-%m-%d")
-    splits_dict = {}
-    try:
-        url = f"https://api.nasdaq.com/api/calendar/splits?date={date_str}"
-        res = requests.get(url, headers=NASDAQ_HEADERS, timeout=12)
-        if res.status_code != 200:
-            print(f"⚠️ Nasdaq Splits API status {res.status_code}")
-            rows = []
-        else:
-            rows = (res.json() or {}).get('data', {}).get('rows') or []
-
-        for row in rows:
-            if not row:
-                continue
-            symbol = str(row.get('symbol', '')).strip().upper()
-            if not symbol:
-                continue
-
-            # فلترة صارمة بتاريخ التنفيذ الفعلي فقط
-            exec_date_raw = row.get('executionDate') or row.get('execution_date') or ''
-            exec_date = parse_nasdaq_execution_date(exec_date_raw)
-            if exec_date != today_est:
-                continue
-
-            ratio_str = str(row.get('ratio', '') or row.get('ratioDescription', ''))
-            num, den = extract_ratio_numbers(ratio_str)
-            if not is_reverse_split(num, den, ratio_str):
-                continue
-
-            is_executed, factor, curr_p, prev_p = verify_actual_execution(symbol, num, den)
-            if is_executed:
-                if num and den and num > den:
-                    num, den = den, num
-                splits_dict[symbol] = {
-                    'symbol': symbol,
-                    'num': num,
-                    'den': den,
-                    'raw_text': ratio_str,
-                    'split_date': date_str,
-                    'factor': factor,
-                    'source': 'nasdaq'
-                }
-    except Exception as e:
-        print(f"❌ Nasdaq API Error ({date_str}):", e)
-    return list(splits_dict.values())
-
-def get_unscheduled_reverse_splits(known_symbols):
-    today_est = get_est_now().date()
-    date_str = today_est.strftime("%Y-%m-%d")
-    candidates = []
-    for field in ("change", "premarket_change"):
-        try:
-            payload = {
-                "filter": [
-                    {"left": field, "operation": "greater", "right": 80},
-                    {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
-                    {"left": "type", "operation": "equal", "right": "stock"}
-                ],
-                "columns": ["name", field],
-                "sort": {"sortBy": field, "sortOrder": "desc"},
-                "range": [0, 60]
-            }
-            res = requests.post("https://scanner.tradingview.com/america/scan",
-                                json=payload, headers=COMMON_HEADERS, timeout=12)
-            if res.status_code == 200:
-                for row in res.json().get("data", []):
-                    d = row.get("d", [])
-                    if d and d[0] and d[0].upper() not in candidates:
-                        candidates.append(d[0].upper())
-        except Exception as e:
-            print(f"Unscheduled scan error ({field}):", e)
-    found = []
-    for sym in candidates[:60]:
-        if sym in known_symbols:
-            continue
-        try:
-            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
-                   f"?events=splits&interval=1d&range=5d")
-            r = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()['chart']['result'][0]
-            splits = (r.get('events') or {}).get('splits', {})
-            for s in splits.values():
-                n, d_ = s.get('numerator'), s.get('denominator')
-                sdate = s.get('date')
-                if not n or not d_ or sdate is None:
-                    continue
-                s_day = datetime.datetime.fromtimestamp(sdate, ZoneInfo("America/New_York")).date()
-                if n < d_ and s_day == today_est:
-                    found.append({
-                        'symbol': sym,
-                        'num': float(n),
-                        'den': float(d_),
-                        'raw_text': f"{int(n)}-for-{int(d_)}",
-                        'split_date': date_str,
-                        'factor': float(d_) / float(n),
-                        'unscheduled': True
-                    })
-                    break
-        except Exception as e:
-            print(f"Unscheduled verify error ({sym}):", e)
-    return found
-
-def get_tradingview_stock_data(ticker):
-    url = "https://scanner.tradingview.com/america/scan"
-    payload = {
-        "filter": [
-            {"left": "name", "operation": "equal", "right": ticker.upper()},
-            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]}
-        ],
-        "columns": [
-            "name", "close", "change", "float_shares_outstanding", "total_shares_outstanding",
-            "sector", "industry", "type", "subtype", "premarket_close", "premarket_change",
-            "premarket_volume", "postmarket_close", "postmarket_change", "postmarket_volume",
-            "volume", "market_cap_basic", "country"
-        ]
-    }
-    data = {
-        'found': False, 'is_valid_stock': True, 'price': 0.0, 'change_pct': 0.0, 'raw_float': 0.0,
-        'total_shares': 0.0, 'sector': 'غير متوفر', 'industry': 'غير متوفر', 'country': 'غير متوفر',
-        'volume': 0.0, 'market_cap': 0.0
-    }
-    try:
-        res = requests.post(url, json=payload, headers=COMMON_HEADERS, timeout=10)
-        if res.status_code == 200:
-            rows = res.json().get("data", [])
-            if rows:
-                cols = rows[0].get("d", [])
-                data['found'] = True
-                data['price'] = float(cols[1] or 0.0)
-                data['change_pct'] = float(cols[2] or 0.0)
-                data['raw_float'] = float(cols[3] or 0.0)
-                data['total_shares'] = float(cols[4] or 0.0)
-                raw_sec = cols[5] or ''
-                raw_ind = cols[6] or ''
-                entity_type = str(cols[7] or '').lower()
-                entity_subtype = str(cols[8] or '').lower()
-                invalid_types = ['fund', 'etf', 'cef', 'right', 'warrant', 'bond']
-                if any(inv in entity_type or inv in entity_subtype for inv in invalid_types):
-                    data['is_valid_stock'] = False
-                if raw_sec:
-                    data['sector'] = SECTOR_MAP.get(raw_sec, raw_sec)
-                if raw_ind:
-                    data['industry'] = INDUSTRY_MAP.get(raw_ind, raw_ind)
-                data['volume'] = float(cols[15] or 0.0)
-                data['market_cap'] = float(cols[16] or 0.0)
-                raw_country = cols[17] if len(cols) > 17 and cols[17] else ''
-                if raw_country:
-                    data['country'] = COUNTRY_MAP.get(raw_country, raw_country)
-    except Exception as e:
-        print(f"TradingView API Error ({ticker}): {e}")
-    return data
-
-def load_presplit():
-    if os.path.exists(PRESPLIT_FILE):
-        try:
-            with open(PRESPLIT_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_presplit(data):
-    with open(PRESPLIT_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-def get_base_shares(tv_data, price):
-    base = tv_data['raw_float'] if tv_data['raw_float'] > 0 else tv_data['total_shares']
-    if base <= 0 and tv_data['market_cap'] > 0 and price > 0:
-        base = tv_data['market_cap'] / price
-    return base
-
-def snapshot_next_day_floats():
-    now_est = get_est_now()
-    next_day = now_est.date() + datetime.timedelta(days=1)
-    while next_day.weekday() >= 5:
-        next_day += datetime.timedelta(days=1)
-    date_str = next_day.strftime("%Y-%m-%d")
-    store = load_presplit()
-    done_key = f"_done_{date_str}"
-    if store.get(done_key):
-        return
-    try:
-        url = f"https://api.nasdaq.com/api/calendar/splits?date={date_str}"
-        res = requests.get(url, headers=NASDAQ_HEADERS, timeout=10)
-        if res.status_code != 200:
-            return
-        rows = (res.json() or {}).get('data', {}).get('rows') or []
-        for row in rows:
-            if not row:
-                continue
-            symbol = str(row.get('symbol', '')).strip().upper()
-            num, den = extract_ratio_numbers(str(row.get('ratio', '')))
-            if not symbol or num is None or den is None:
-                continue
-            if not is_reverse_split(num, den, str(row.get('ratio', ''))):
-                continue
-            tv = get_tradingview_stock_data(symbol)
-            if not tv['is_valid_stock']:
-                continue
-            base = get_base_shares(tv, tv['price'])
-            if base > 0:
-                store[symbol] = {"date": date_str, "pre_float": base}
-        store[done_key] = True
-        save_presplit(store)
-    except Exception as e:
-        print("snapshot_next_day_floats error:", e)
-
-def resolve_post_split_float(symbol, current_base, factor):
-    if current_base <= 0:
-        return 0.0
-    if not factor or factor <= 1:
-        return current_base
-    pre = load_presplit().get(symbol, {}).get("pre_float", 0.0)
-    if pre > 0:
-        expected = pre / factor
-        if abs(current_base - expected) / expected <= 0.30:
-            return current_base
-        return expected
-    return current_base / factor
-
-def get_prior_splits_count(ticker):
-    count = 0
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?events=splits&interval=1d&range=10y"
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()
-        splits = res.get('chart', {}).get('result', [{}])[0].get('events', {}).get('splits', {})
-        for item in splits.values():
-            if item.get('numerator', 1) < item.get('denominator', 1):
-                count += 1
-    except Exception:
-        pass
-    return count
-
-def get_prior_split_candle_drops(ticker):
-    out = {'weekly': None, 'monthly': None}
-    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
-    try:
-        for key, interval in (('weekly', '1wk'), ('monthly', '1mo')):
-            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-                   f"?events=splits&interval={interval}&range=10y")
-            r = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()['chart']['result'][0]
-            ts = r.get('timestamp') or []
-            q = r['indicators']['quote'][0]
-            splits = (r.get('events') or {}).get('splits', {})
-            for item in splits.values():
-                if not item.get('numerator', 1) < item.get('denominator', 1):
-                    continue
-                sdate = item.get('date')
-                if sdate is None or sdate > now_ts - 86400:
-                    continue
-                idx = None
-                for i, t in enumerate(ts):
-                    if t <= sdate:
-                        idx = i
-                    else:
-                        break
-                if idx is None:
-                    continue
-                o, c = q['open'][idx], q['close'][idx]
-                if not o or not c:
-                    continue
-                chg = (c / o - 1) * 100
-                if out[key] is None or chg < out[key]:
-                    out[key] = chg
-    except Exception as e:
-        print(f"Prior split drops error ({ticker}):", e)
-    return out
-
-def evaluate_mm_criteria(ticker, factor, post_split_float, prior_splits, unscheduled=False):
-    matched = []
-    if 0 < post_split_float < 900_000:
-        matched.append("Float بعد التقسيم أقل من 900 ألف")
-    drops = get_prior_split_candle_drops(ticker)
-    if drops['weekly'] is not None and drops['weekly'] <= -40:
-        matched.append(f"تقسيم سابق تبعه هبوط أسبوعي {round(drops['weekly'], 1)}%")
-    if drops['monthly'] is not None and drops['monthly'] <= -30:
-        matched.append(f"تقسيم سابق تبعه هبوط شهري {round(drops['monthly'], 1)}%")
-    if factor and factor > 30:
-        matched.append("نسبة تقسيم أعلى من 1:30")
-    if prior_splits + 1 > 3:
-        matched.append("تقسيم مكرر أكثر من 3 مرات")
-    if unscheduled:
-        matched.append("غير مجدول (غير معلن بتقويم Nasdaq)")
-    return matched
-
-def get_3m_candles(ticker, limit=9):
-    try:
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-               f"?interval=1m&range=1d&includePrePost=true")
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()
-        r = res['chart']['result'][0]
-        ts = r['timestamp']
-        q = r['indicators']['quote'][0]
-        buckets = {}
-        for i, t in enumerate(ts):
-            o, h, l, c, v = q['open'][i], q['high'][i], q['low'][i], q['close'][i], q['volume'][i]
-            if None in (o, h, l, c, v):
-                continue
-            key = t - (t % 180)
-            b = buckets.get(key)
-            if not b:
-                buckets[key] = {'o': o, 'h': h, 'l': l, 'c': c, 'v': v}
-            else:
-                b['h'] = max(b['h'], h)
-                b['l'] = min(b['l'], l)
-                b['c'] = c
-                b['v'] += v
-        candles = [buckets[k] for k in sorted(buckets)]
-        if len(candles) > 1:
-            candles = candles[:-1]
-        return candles[-limit:]
-    except Exception as e:
-        print(f"3m candles error ({ticker}):", e)
-        return []
-
-def analyze_3m_trend(ticker):
-    candles = get_3m_candles(ticker, 9)
-    if len(candles) < 3:
-        return None
-    last3 = candles[-3:]
-    prev = candles[:-3] if len(candles) >= 6 else candles[:1]
-    avg_prev_vol = (sum(c['v'] for c in prev) / len(prev)) if prev else 1.0
-    vol_ratio = (last3[-1]['v'] / avg_prev_vol) if avg_prev_vol > 0 else 1.0
-    closes_up = last3[0]['c'] < last3[1]['c'] < last3[2]['c']
-    closes_down = last3[0]['c'] > last3[1]['c'] > last3[2]['c']
-    direction = None
-    if closes_up and last3[-1]['c'] > last3[-1]['o']:
-        direction = "up"
-    elif closes_down and last3[-1]['c'] < last3[-1]['o']:
-        direction = "down"
-    return {'direction': direction, 'vol_ratio': vol_ratio}
-
-def get_live_snapshot(ticker):
-    try:
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-               f"?interval=1m&range=1d&includePrePost=true")
-        res = requests.get(url, headers=COMMON_HEADERS, timeout=8).json()
-        r = res['chart']['result'][0]
-        meta = r.get('meta', {})
-        periods = meta.get('currentTradingPeriod', {})
-        reg_start = periods.get('regular', {}).get('start', 0)
-        reg_end = periods.get('regular', {}).get('end', 0)
-        post_start = periods.get('post', {}).get('start', reg_end)
-        ts = r.get('timestamp', [])
-        q = r['indicators']['quote'][0]
-        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
-        if now_ts < reg_start:
-            session_type = "PRE"
-            target_start = periods.get('pre', {}).get('start', 0)
-            base_price = meta.get('previousClose') or meta.get('chartPreviousClose')
-            official_vol = meta.get('preMarketVolume') or meta.get('regularMarketVolume') or 0
-        elif reg_start <= now_ts < reg_end:
-            session_type = "REG"
-            target_start = reg_start
-            base_price = meta.get('previousClose') or meta.get('chartPreviousClose')
-            official_vol = meta.get('regularMarketVolume') or 0
-        else:
-            session_type = "AH"
-            target_start = post_start
-            base_price = meta.get('regularMarketPrice') or meta.get('previousClose')
-            official_vol = meta.get('postMarketVolume') or meta.get('regularMarketVolume') or 0
-        snap = {
-            'session': session_type, 'open': None, 'last': meta.get('regularMarketPrice'),
-            'high': None, 'low': None, 'vol': official_vol, 'base_price': base_price
-        }
-        calc_vol = 0.0
-        for i, t in enumerate(ts):
-            o, h, l, c, v = q['open'][i], q['high'][i], q['low'][i], q['close'][i], q['volume'][i]
-            if None in (o, h, l, c, v):
-                continue
-            snap['last'] = c
-            if t >= target_start:
-                if snap['open'] is None:
-                    snap['open'] = o
-                snap['high'] = h if snap['high'] is None else max(snap['high'], h)
-                snap['low'] = l if snap['low'] is None else min(snap['low'], l)
-                calc_vol += v
-        if official_vol and official_vol > 0:
-            snap['vol'] = official_vol
-        else:
-            snap['vol'] = calc_vol
-        if snap['vol'] <= 0:
-            tv_meta = get_tradingview_stock_data(ticker)
-            snap['vol'] = tv_meta.get('volume', 0.0)
-        return snap if snap['last'] else None
-    except Exception as e:
-        print(f"Live snapshot error ({ticker}):", e)
-        return None
-
-def build_live_card(sym, snap, trend_word, ksa_time_str, ratio_str="", activated_at="", sector="غير متوفر", industry="غير متوفر", country="غير متوفر", split_reason="غير متوفر"):
-    tv_url = f"https://www.tradingview.com/chart/?symbol={sym}"
-    session = snap.get('session', 'REG')
-    if session == "PRE":
-        status = "🟡 ما قبل الافتتاح (Pre-Market)"
-    elif session == "AH":
-        status = "🌙 ما بعد الإغلاق (After-Hours)"
-    else:
-        status = "🟢 مفتوح (الجلسة الرسمية)"
-    
-    if snap['open'] and snap['open'] > 0:
-        open_str = f"${round(snap['open'], 2)}"
-        base = snap['base_price'] or snap['open']
-        chg = ((snap['last'] / base) - 1) * 100 if base > 0 else 0.0
-        chg_str = f"{'+' if chg >= 0 else ''}{round(chg, 2)}%"
-        hl_str = f"${round(snap['high'], 2)} / ${round(snap['low'], 2)}"
-        vol_val = snap.get('vol', 0)
-        vol_str = f"{int(vol_val):,} سهم" if vol_val > 0 else "—"
-    else:
-        open_str = "بانتظار التداول"
-        chg_str = "—"
-        hl_str = "—"
-        vol_str = "—"
-    
-    effective_open = snap.get('open') if (snap and snap.get('open') and snap['open'] > 0) else 0.0
-    if effective_open > 0 and snap.get('last') and snap['last'] > 0:
-        split_chg = ((snap['last'] - effective_open) / effective_open) * 100
-        split_chg_line = f"التغير من شمعة التقسيم ٪+-: <b>{'+' if split_chg >= 0 else ''}{round(split_chg, 2)}%</b>\n"
-    else:
-        split_chg_line = ""
-    
-    liq_info = analyze_liquidity_and_diamond(sym)
-    b_high_str = f"${round(liq_info['black_high'], 2)}" if liq_info['black_high'] > 0 else "—"
-    
-    if liq_info["has_black_candle"]:
-        black_line = f"⬛ شمعة السيولة السوداء: <b>تم الرصد (فوليوم {liq_info['volume_ratio']}x | هاي: {b_high_str})</b>\n"
-    else:
-        black_line = "⬛ شمعة السيولة السوداء: <b>قيد المراقبة (بانتظار تدفق السيولة)</b>\n"
-
-    if liq_info["diamond_breakout"]:
-        diamond_line = f"💎 إشارة دايموند: <b>✨ تم الاختراق الإيجابي فوق {b_high_str}</b>\n"
-    else:
-        diamond_line = f"💎 إشارة دايموند: <b>⏳ بانتظار اختراق الـ High ({b_high_str})</b>\n"
-
-    ratio_line = f"نسبة التقسيم : <b>{html.escape(ratio_str)}</b>\n" if ratio_str else ""
-    reason_line = f"سبب التقسيم وإعادة الهيكلة: <b>{html.escape(split_reason)}</b>\n"
-    activation_line = f"وقت وتاريخ التفعيل: <b>{activated_at}</b>\n" if activated_at else ""
-
-    return (
-        f"🔴 <b>LIVE | ${sym}</b>\n"
-        f"القطاع: <b>{html.escape(sector)}</b>\n"
-        f"الصناعة: <b>{html.escape(industry)}</b>\n"
-        f"الدولة: <b>{html.escape(country)}</b>\n"
-        f"{ratio_line}"
-        f"{reason_line}"
-        f"{activation_line}"
-        f"الحالة: <b>{status}</b>\n"
-        f"─────────────────\n"
-        f"{black_line}"
-        f"{diamond_line}"
-        f"─────────────────\n"
-        f"بداية الجلسة: <b>{open_str}</b>\n"
-        f"السعر الآن: <b>${round(snap['last'], 2)}</b>\n"
-        f"التغير للجلسة: <b>{chg_str}</b>\n"
-        f"{split_chg_line}"
-        f"الاتجاه (9 شموع / 3د): <b>{trend_word}</b>\n"
-        f"أعلى / أدنى بالجلسة: <b>{hl_str}</b>\n"
-        f"فوليوم الجلسة: <b>{vol_str}</b>\n"
-        f"آخر تحديث: <b>{ksa_time_str} (السعودية)</b>\n"
-        f"الشارت: <a href='{tv_url}'>TradingView</a>"
-    )
-
-def run_splits_task():
-    print("=" * 50)
-    now_ksa = get_ksa_now()
-    print(f"🔄 [SPLITS] بداية الدورة: {now_ksa.strftime('%Y-%m-%d %H:%M:%S')}")
-    watchlist = load_watchlist(SPLITS_WATCHLIST_FILE)
-    now_est = get_est_now()
-    today_est_str = now_est.strftime("%Y-%m-%d")
-    ksa_date_str = now_ksa.strftime("%Y-%m-%d")
-    ksa_datetime_str = now_ksa.strftime("%Y-%m-%d %H:%M")
-    ksa_time_str = now_ksa.strftime("%H:%M")
-    sent_today_key = f"sent_today_{today_est_str}"
-
-    # تنظيف الـ watchlist: الإبقاء فقط على أسهم اليوم
-    cleaned_watchlist = {}
-    for sym, item in watchlist.items():
-        if sym == sent_today_key:
-            cleaned_watchlist[sym] = item
-        elif isinstance(item, dict) and item.get("added_date") == today_est_str:
-            cleaned_watchlist[sym] = item
-    watchlist = cleaned_watchlist
-
-    splits = get_today_reverse_splits()
-    known_syms = {s['symbol'] for s in splits}
-    splits.extend(get_unscheduled_reverse_splits(known_syms))
-    snapshot_next_day_floats()
-
-    # ========== بطاقة الإعلان اليومية (مرة واحدة فقط) ==========
-    if not watchlist.get(sent_today_key):
-        lines = []
-        for item in splits:
-            symbol = item['symbol']
-            tv_data = get_tradingview_stock_data(symbol)
-            if not tv_data['is_valid_stock']:
-                continue
-
-            ratio_ar = format_ratio_ar(item['num'], item['den'], item['raw_text'])
-            sector = tv_data.get('sector', 'غير متوفر')
-            industry = tv_data.get('industry', 'غير متوفر')
-            activity = f"{sector} / {industry}" if industry != 'غير متوفر' else sector
-
-            watchlist[symbol] = {
-                "added_date": today_est_str,
-                "ratio": item['raw_text'],
-                "activated_at": ksa_datetime_str,
-                "sector": sector,
-                "industry": industry,
-                "country": tv_data.get('country', 'غير متوفر'),
-                "split_reason": get_split_reason_ar(symbol),
-                "last_price": tv_data.get('price', 0.0),
-                "last_news_title": "",
-                "last_black_candle": False,
-                "last_diamond": False,
-                "active_updates_count": 0,
-                "executed": True
-            }
-
-            lines.append(f"<b>{symbol}</b>    {html.escape(activity)}    <b>{html.escape(ratio_ar)}</b>")
-
-        if lines:
-            header = f"📌 <b>أسهم التقسيم العكسي المنفذة اليوم ({ksa_date_str})</b>\n\n"
-            header += "<b>الرمز    النشاط                    نسبة التقسيم</b>\n"
-            header += "──────────────────────────────\n"
-            msg = header + "\n".join(lines)
-            send_telegram_message(msg)
-            print(f"✅ تم إرسال قائمة التقسيم العكسي ({len(lines)} أسهم)")
-        else:
-            send_telegram_message(
-                f"📌 <b>أسهم التقسيم العكسي — اليوم ({ksa_date_str})</b>\n\n"
-                f"لا توجد تقسيمات عكسية مؤكدة ومطبقة فعلياً اليوم."
-            )
-            print("ℹ️ لا توجد تقسيمات مؤكدة اليوم")
-
-        watchlist[sent_today_key] = True
-
-    # ========== تحديث بطاقات LIVE (فقط للأسهم المنفذة) ==========
-    for sym, item_data in list(watchlist.items()):
-        if sym.startswith("sent_today_") or not item_data.get("executed"):
-            continue
-
-        snap = get_live_snapshot(sym)
-        if not snap:
-            continue
-
-        current_price = snap['last']
-        last_price = item_data.get("last_price", current_price)
-
-        liq_info = analyze_liquidity_and_diamond(sym)
-        current_black_candle = liq_info["has_black_candle"]
-        last_black_candle = item_data.get("last_black_candle", False)
-        current_diamond = liq_info["diamond_breakout"]
-        last_diamond = item_data.get("last_diamond", False)
-
-        bz = get_benzinga_split_news(sym)
-        current_news_title = bz['title'] if bz else ""
-        last_news_title = item_data.get("last_news_title", "")
-
-        active_count = item_data.get("active_updates_count", 0)
-
-        price_increased = current_price > last_price
-        has_new_news = (current_news_title != "" and current_news_title != last_news_title)
-        is_initial_phase = active_count < 6
-        black_candle_appeared = (current_black_candle and not last_black_candle)
-        diamond_appeared = (current_diamond and not last_diamond)
-
-        if is_initial_phase or price_increased or has_new_news or black_candle_appeared or diamond_appeared:
-            trend = analyze_3m_trend(sym)
-            if trend and trend['direction'] == "up":
-                trend_word = "📈 صاعد قوي"
-            elif trend and trend['direction'] == "down":
-                trend_word = "📉 هابط قوي"
-            else:
-                candles = get_3m_candles(sym, 3)
-                if len(candles) >= 3:
-                    c0, c1, c2 = candles[-3]['c'], candles[-2]['c'], candles[-1]['c']
-                    if c0 < c1 < c2:
-                        trend_word = "📈 صاعد"
-                    elif c0 > c1 > c2:
-                        trend_word = "📉 هابط"
-                    else:
-                        trend_word = "➡️ عرضي"
-                else:
-                    trend_word = "غير كافٍ"
-
-            card = build_live_card(
-                sym, snap, trend_word, ksa_time_str,
-                ratio_str=item_data.get("ratio", ""),
-                activated_at=item_data.get("activated_at", ksa_datetime_str),
-                sector=item_data.get("sector", "غير متوفر"),
-                industry=item_data.get("industry", "غير متوفر"),
-                country=item_data.get("country", "غير متوفر"),
-                split_reason=item_data.get("split_reason", "غير متوفر")
-            )
-
-            msg_id = item_data.get("live_msg_id")
-            if msg_id:
-                success = edit_telegram_message(msg_id, card)
-                if not success:
-                    new_id = send_telegram_get_id(card)
-                    if new_id:
-                        watchlist[sym]["live_msg_id"] = new_id
-            else:
-                new_id = send_telegram_get_id(card)
-                if new_id:
-                    watchlist[sym]["live_msg_id"] = new_id
-
-            watchlist[sym]["last_price"] = current_price
-            if current_news_title:
-                watchlist[sym]["last_news_title"] = current_news_title
-            watchlist[sym]["last_black_candle"] = current_black_candle
-            watchlist[sym]["last_diamond"] = current_diamond
-            watchlist[sym]["active_updates_count"] = active_count + 1
-            print(f"🔄 تم تحديث بطاقة LIVE للسهم {sym}")
-        else:
-            print(f"ℹ️ السهم {sym} مستقر — تخطي التحديث")
-
-    print("✅ انتهت دورة التقسيم العكسي")
-    save_watchlist(watchlist, SPLITS_WATCHLIST_FILE)
-
-# ---------------------------------------------------------
-# دوال IPO
-# ---------------------------------------------------------
-def load_ipo_watchlist():
-    if os.path.exists(IPO_WATCHLIST_FILE):
-        try:
-            with open(IPO_WATCHLIST_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_ipo_watchlist(watchlist):
-    with open(IPO_WATCHLIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(watchlist, f, ensure_ascii=False, indent=4)
-
-def get_today_ipos():
-    today = get_est_now().date()
-    target = today.strftime("%m/%d/%Y")
-    ipos = {}
-    try:
-        url = f"https://api.nasdaq.com/api/ipo/calendar?date={today.strftime('%Y-%m')}"
-        res = requests.get(url, headers=NASDAQ_HEADERS, timeout=10)
-        if res.status_code != 200:
-            print(f"❌ Nasdaq IPO status: {res.status_code}")
-            return []
-        data = (res.json() or {}).get('data') or {}
-        priced = ((data.get('priced') or {}).get('rows')) or []
-        upcoming = (((data.get('upcoming') or {}).get('upcomingTable') or {}).get('rows')) or []
-        for rows, date_key, status in ((upcoming, 'expectedPriceDate', 'upcoming'),
-                                       (priced, 'pricedDate', 'priced')):
-            for row in rows:
-                if not row:
-                    continue
-                if str(row.get(date_key, '')).strip() != target:
-                    continue
-                symbol = str(row.get('proposedTickerSymbol', '')).strip().upper()
-                if not symbol:
-                    continue
-                price_raw = str(row.get('proposedSharePrice', '') or '').strip()
-                nums = parse_numbers(price_raw)
-                price_num = (sum(nums) / len(nums)) if nums else 0.0
-                shares_nums = parse_numbers(row.get('sharesOffered', ''))
-                ipos[symbol] = {
-                    'symbol': symbol,
-                    'name': str(row.get('companyName', '') or '').strip(),
-                    'price_raw': price_raw,
-                    'price_num': price_num,
-                    'shares_offered': shares_nums[0] if shares_nums else 0.0,
-                    'cal_status': status
-                }
-    except Exception as e:
-        print("❌ Nasdaq IPO API Error:", e)
-    return list(ipos.values())
-
-REG_A_FORMS = ("253G1", "253G2", "253G3", "253G4", "1-A", "1-A/A", "QUALIF", "1-A POS")
-TRAD_FORMS = ("424B4", "424B1", "424B3", "S-1", "S-1/A", "F-1", "F-1/A")
-
-def sec_find_filings(company_name):
-    if not company_name:
-        return []
-    start = (get_est_now().date() - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
-    end = get_est_now().date().strftime("%Y-%m-%d")
-    params = {
-        "q": f'"{company_name}"',
-        "forms": ",".join(REG_A_FORMS + TRAD_FORMS),
-        "dateRange": "custom", "startdt": start, "enddt": end
-    }
-    try:
-        res = requests.get("https://efts.sec.gov/LATEST/search-index",
-                           params=params, headers=SEC_HEADERS, timeout=20)
-        if res.status_code == 200:
-            return (res.json().get("hits") or {}).get("hits") or []
-    except Exception as e:
-        print(f"SEC search error ({company_name}):", e)
-    return []
-
-def hit_form(hit):
-    src = hit.get("_source", {}) or {}
-    return str(src.get("form") or src.get("file_type") or "").upper()
-
-def hit_url(hit):
-    try:
-        adsh, fname = str(hit.get("_id", "")).split(":", 1)
-        ciks = (hit.get("_source", {}) or {}).get("ciks") or []
-        cik = str(ciks[0]).lstrip("0")
-        return f"https://www.sec.gov/Archives/edgar/data/{cik}/{adsh.replace('-', '')}/{fname}"
-    except Exception:
-        return None
-
-def detect_greenshoe_in_doc(url):
-    try:
-        res = requests.get(url, headers=SEC_HEADERS, timeout=30)
-        if res.status_code != 200:
-            return None
-        text = html.unescape(re.sub(r'<[^>]+>', ' ', res.text[:4_000_000]))
-        text = re.sub(r'\s+', ' ', text)
-        m = re.search(
-            r'option[^.]{0,200}?(?:purchase|buy)[^.]{0,60}?up to\s+([\d,]+)\s+(?:additional\s+)?(?:ordinary\s+|common\s+|class [a-z]\s+)?shares',
-            text, re.I)
-        if m:
-            return f"✅ نعم — حتى {m.group(1)} سهم إضافي"
-        if re.search(r'over-?allotment|greenshoe', text, re.I):
-            return "✅ نعم (الكمية غير مستخرجة)"
-        return "❌ غير مذكور في النشرة"
-    except Exception as e:
-        print("Greenshoe parse error:", e)
-        return None
-
-def analyze_offering(company_name):
-    hits = sec_find_filings(company_name)
-    if not hits:
+def fetch_live_price(ticker):
+    """جلب السعر الحالي الفوري وحجم التداول من ياهو فاينانشال للجلسات الثلاث"""
+    url = f"https://yahoo.com{ticker}?interval=1m&range=1d&includePrePost=true"
+    res = make_request(url)
+    if not res:
         return None, None
-    forms = [hit_form(h) for h in hits]
-    if any(f in REG_A_FORMS for f in forms):
-        return "Regulation A Tier 2", "❌ غير متاح عادةً في Reg A"
-    trad_hits = [h for h in hits if hit_form(h) in TRAD_FORMS]
-    if trad_hits:
-        trad_hits.sort(key=lambda h: 0 if hit_form(h).startswith("424B") else 1)
-        green = None
-        url = hit_url(trad_hits[0])
-        if url:
-            green = detect_greenshoe_in_doc(url)
-        return "IPO تقليدي", green
-    return None, None
+    try:
+        data = res.json()
+        meta = data["chart"]["result"][0]["meta"]
+        current_price = meta.get("regularMarketPrice")
+        
+        # في فترات ما قبل وبعد السوق، نحاول جلب السعر الممتد (Extended Price)
+        if get_market_session() in ["PRE_MARKET", "POST_MARKET"]:
+            current_price = meta.get("customMarketPrice") or meta.get("regularMarketPrice")
+            
+        indicators = data["chart"]["result"][0]["indicators"]["quote"][0]
+        volumes = [v for v in indicators.get("volume", []) if v is not None]
+        total_volume = sum(volumes) if volumes else 0
+        
+        return current_price, total_volume
+    except:
+        return None, None
 
-def fmt_pct(v):
-    return f"{'+' if v >= 0 else ''}{round(v, 2)}%"
-
-def build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str):
-    tv_url = f"https://www.tradingview.com/chart/?symbol={sym}"
-    price_raw = item.get('price_raw', '')
-    if price_raw:
-        price_disp = price_raw if '$' in price_raw else f"${price_raw}"
-    else:
-        price_disp = "غير معلن"
-    if tv['raw_float'] > 0:
-        float_disp = format_shares_count(tv['raw_float'])
-    elif item.get('shares_offered', 0) > 0:
-        float_disp = f"{format_shares_count(item['shares_offered'])} (المطروحة)"
-    else:
-        float_disp = "غير متوفر"
-    
-    executed = tv['found'] and tv['price'] > 0 and tv['volume'] > 0
-    ipo_price = item.get('price_num', 0.0)
-    if executed:
-        status = "✅ تم التنفيذ (بدأ التداول)"
-        cur_price = f"${round(tv['price'], 2)}"
-        if ipo_price > 0 and item.get('cal_status') == 'priced':
-            chg_str = fmt_pct(((tv['price'] / ipo_price) - 1) * 100)
-        elif ipo_price > 0:
-            chg_str = f"{fmt_pct(((tv['price'] / ipo_price) - 1) * 100)} (مقابل السعر المتوقع)"
-        else:
-            chg_str = "غير متوفر"
-        vol_str = f"{int(tv['volume']):,} سهم"
-    else:
-        status = "⏳ بانتظار التنفيذ"
-        cur_price = "—"
-        chg_str = "—"
-        vol_str = "—"
-    
-    offering_type = item.get('offering_type') or "غير محدد"
-    greenshoe = item.get('greenshoe') or "غير محدد"
-    name_line = f"الشركة: <b>{html.escape(item.get('name', ''))}</b>\n" if item.get('name') else ""
-    
-    return (
-        f"🆕 <b>IPO | ${sym}</b>\n"
-        f"{name_line}"
-        f"تاريخ الاكتتاب: <b>اليوم ({ksa_date_str})</b>\n"
-        f"القطاع: <b>{html.escape(tv['sector'])}</b>\n"
-        f"الصناعة: <b>{html.escape(tv['industry'])}</b>\n"
-        f"الدولة: <b>{html.escape(tv['country'])}</b>\n"
-        f"سعر الاكتتاب المتوقع: <b>{html.escape(price_disp)}</b>\n"
-        f"Free float: <b>{float_disp}</b>\n"
-        f"نوع الطرح: <b>{html.escape(offering_type)}</b>\n"
-        f"خيار الاكتتاب الزائد (Greenshoe): <b>{html.escape(greenshoe)}</b>\n"
-        f"حالة التنفيذ: <b>{status}</b>\n"
-        f"السعر الحالي: <b>{cur_price}</b>\n"
-        f"السعر من التنفيذ ٪+-: <b>{chg_str}</b>\n"
-        f"Vol: <b>{vol_str}</b>\n"
-        f"آخر تحديث: <b>{ksa_time_str} (السعودية)</b>\n"
-        f"الشارت: <a href='{tv_url}'>TradingView</a>"
-    )
-
-def run_ipo_task():
-    print("=" * 50)
-    now_ksa = get_ksa_now()
-    now_est = get_est_now()
-    print(f"🔄 [IPO] بداية الدورة: {now_ksa.strftime('%Y-%m-%d %H:%M:%S')}")
-    today_est_str = now_est.strftime("%Y-%m-%d")
-    ksa_date_str = now_ksa.strftime("%Y-%m-%d")
-    ksa_time_str = now_ksa.strftime("%H:%M")
-    sent_today_key = f"sent_today_{today_est_str}"
-    watchlist = load_ipo_watchlist()
-
-    # تنظيف
-    cleaned = {}
-    for sym, item in watchlist.items():
-        if sym == sent_today_key:
-            cleaned[sym] = item
-        elif isinstance(item, dict) and item.get("added_date") == today_est_str:
-            cleaned[sym] = item
-    watchlist = cleaned
-
-    todays = get_today_ipos()
-
-    # ========== بطاقة الإعلان اليومية (مرة واحدة فقط) ==========
-    if not watchlist.get(sent_today_key):
-        if not todays:
-            send_telegram_message(
-                f"📌 <b>أسهم الاكتتاب IPO — اليوم ({ksa_date_str})</b>\n\n"
-                f"لا توجد اكتتابات مجدولة اليوم."
-            )
-            print("ℹ️ لا توجد اكتتابات اليوم")
-        else:
-            lines = []
-            for ipo in todays:
-                sym = ipo['symbol']
-                tv = get_tradingview_stock_data(sym)
-                if tv['found'] and not tv['is_valid_stock']:
-                    continue
-
-                activity = f"{tv.get('sector', 'غير متوفر')} / {tv.get('industry', 'غير متوفر')}"
-                price_disp = ipo.get('price_raw') or "غير معلن"
-                if price_disp and '$' not in str(price_disp):
-                    price_disp = f"${price_disp}"
-                country = tv.get('country', 'غير متوفر')
-
-                lines.append(
-                    f"<b>{sym}</b>    {html.escape(activity)}    <b>{html.escape(str(price_disp))}</b>    {html.escape(country)}"
-                )
-
-                if sym not in watchlist:
-                    watchlist[sym] = {
-                        "added_date": today_est_str,
-                        "sec_attempts": 0,
-                        "last_price": 0.0,
-                        "active_updates_count": 0,
-                        "executed": False
-                    }
-                entry = watchlist[sym]
-                entry.update({
-                    'name': ipo['name'],
-                    'price_raw': ipo['price_raw'],
-                    'price_num': ipo['price_num'],
-                    'shares_offered': ipo['shares_offered'],
-                    'cal_status': ipo['cal_status']
-                })
-
-            if lines:
-                header = f"📌 <b>أسهم الاكتتاب IPO اليوم ({ksa_date_str})</b>\n\n"
-                header += "<b>الرمز    النشاط                    السعر المتوقع    الدولة</b>\n"
-                header += "──────────────────────────────\n"
-                msg = header + "\n".join(lines)
-                send_telegram_message(msg)
-                print(f"✅ تم إرسال قائمة IPO ({len(lines)} أسهم)")
-
-        watchlist[sent_today_key] = True
-
-    # ========== تحديث بطاقات LIVE للاكتتابات ==========
-    for sym, item in list(watchlist.items()):
-        if sym.startswith("sent_today_"):
-            continue
-
-        if (not item.get('offering_type')) and item.get('sec_attempts', 0) < 5:
-            item['sec_attempts'] = item.get('sec_attempts', 0) + 1
-            otype, green = analyze_offering(item.get('name', ''))
-            if otype:
-                item['offering_type'] = otype
-                item['greenshoe'] = green or "غير محدد"
-
-        tv = get_tradingview_stock_data(sym)
-        if tv['found'] and not tv['is_valid_stock']:
-            continue
-
-        current_price = tv['price']
-        last_price = item.get("last_price", current_price)
-        active_count = item.get("active_updates_count", 0)
-
-        # نعتبره منفذ إذا بدأ التداول
-        if tv['found'] and tv['price'] > 0 and tv['volume'] > 0:
-            item['executed'] = True
-
-        price_increased = current_price > last_price
-        is_initial_phase = active_count < 6
-
-        if item.get('executed') and (is_initial_phase or price_increased):
-            card = build_ipo_card(sym, item, tv, ksa_time_str, ksa_date_str)
-            msg_id = item.get("live_msg_id")
-            if msg_id:
-                if not edit_telegram_message(msg_id, card):
-                    new_id = send_telegram_get_id(card)
-                    if new_id:
-                        watchlist[sym]["live_msg_id"] = new_id
-            else:
-                new_id = send_telegram_get_id(card)
-                if new_id:
-                    watchlist[sym]["live_msg_id"] = new_id
-
-            watchlist[sym]["last_price"] = current_price
-            watchlist[sym]["active_updates_count"] = active_count + 1
-
-    save_ipo_watchlist(watchlist)
-    print("🏁 [IPO] انتهت الدورة")
-    print("=" * 50)
+def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(message)
+        return
+    url = f"https://telegram.org{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
+    try: requests.post(url, json=payload, timeout=10)
+    except Exception as e: print(f"❌ خطأ إرسال تليجرام: {e}")
 
 # ---------------------------------------------------------
-# التشغيل المستمر (كل 5 دقائق)
+# المحرك الرئيسي للتتبع المستمر اللحظي
+# ---------------------------------------------------------
+def run_pipeline():
+    today_str = get_est_now().strftime("%Y-%m-%d")
+    cache = load_cache()
+    
+    # تصفير الذاكرة اليومية مع بداية يوم جديد
+    if cache["date"] != today_str:
+        cache = {"date": today_str, "morning_sent": False, "tracked_tickers": [], "last_prices": {}}
+        save_cache(cache)
+        
+    session = get_market_session()
+    if session == "CLOSED":
+        print("😴 السوق مغلق الآن خارج نطاق جلسات التداول الممتدة الثلاث.")
+        return
+
+    now_est = get_est_now()
+    
+    # 1. مرحلة ما قبل الافتتاح بساعة (الإشعار الصباحي الرئيسي)
+    # تطلق من الساعة 8:30 صباحاً بتوقيت نيويورك (ساعة قبل الجلسة الرسمية 9:30)
+    if now_est.time() >= datetime.time(8, 30) and not cache["morning_sent"]:
+        print("🌅 جاري جمع التقسيمات العكسية وإرسال تقرير ما قبل الافتتاح...")
+        discovered_tickers = scrape_nasdaq_splits()
+        
+        if discovered_tickers:
+            cache["tracked_tickers"] = discovered_tickers
+            msg = f"⚠️ <b>تقرير الأسهم الخاضعة لتقسيم عكسي اليوم {today_str}</b>\n"
+            msg += f"⏰ <i>أُرسل قبل الافتتاح بساعة</i>\n\n"
+            for t in discovered_tickers:
+                price, vol = fetch_live_price(t)
+                price_str = f"${price:.2f}" if price else "غير متوفر"
+                msg += f"• الرمز: <code>{t}</code> | السعر الحالي: {price_str}\n"
+            send_telegram(msg)
+        else:
+            send_telegram(f"ℹ️ لا توجد أسهم خاضعة لتقسيم عكسي مدرجة اليوم في تقويم Nasdaq لليوم {today_str}.")
+            
+        cache["morning_sent"] = True
+        save_cache(cache)
+        return
+
+    # 2. مرحلة المتابعة أثناء جلسات السوق الثلاث بدون تكرار
+    if cache["tracked_tickers"]:
+        print(f"🔄 يراقب الآن الأسهم المقسمة في جلسة: {session}...")
+        
+        for ticker in cache["tracked_tickers"]:
+            current_price, total_volume = fetch_live_price(ticker)
+            if not current_price:
+                continue
+                
+            last_price = cache["last_prices"].get(ticker)
+            
+            # منع التكرار: نرسل الإشعار فقط إذا تحرك السهر بنسبة تتجاوز 4% صعوداً أو هبوطاً عن آخر سعر أرسلناه
+            if last_price:
+                change_pct = abs((current_price - last_price) / last_price) * 100
+                should_alert = change_pct >= 4.0
+            else:
+                should_alert = True # أول رصد في الجلسة المفتوحة
+                
+            if should_alert:
+                cache["last_prices"][ticker] = current_price
+                save_cache(cache)
+                
+                direction = "🔺 صعود" if (not last_price or current_price > last_price) else "🔻 هبوط"
+                msg_alert = f"🔄 <b>تحديث تداول سهم تقسيم عكسي ({session})</b>\n\n"
+                msg_alert += f"• الرمز: <code>{ticker}</code>\n"
+                msg_alert += f"• السعر الفوري: <b>${current_price:.4f}</b> ({direction})\n"
+                msg_alert += f"• حجم التداول الكلي اليوم: {total_volume:,} سهم\n"
+                msg_alert += f"• توقيت الرصد: {get_est_now().strftime('%H:%M:%S')} EST\n"
+                send_telegram(msg_alert)
+
+# ---------------------------------------------------------
+# تشغيل الحلقة اللانهائية (Looping)
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    print("🔄 تم تشغيل البوت المدمج (IPO + Reverse Splits + Liquidity & Diamond Engine) - تحديث ذكي كل 5 دقائق")
+    print("🚀 تم تشغيل سكريبت المراقبة المطور والمحمي بالبروكيسات لجلسات وول ستريت الثلاث...")
     while True:
         try:
-            run_splits_task()
-            run_ipo_task()
-            print("✅ انتهت الدورة بنجاح. الانتظار لمدة 5 دقائق للدورة القادمة...")
+            run_pipeline()
         except Exception as e:
-            print(f"❌ حدث خطأ غير متوقع: {e}")
-        
-        time.sleep(300)
+            print(f"❌ حدث خطأ غير متوقع في الحلقة الرئيسية: {e}")
+            
+        # معدل الفحص أثناء الجلسات (كل دقيقتين للتحديث اللحظي)
+        time.sleep(120)
