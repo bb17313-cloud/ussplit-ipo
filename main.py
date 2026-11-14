@@ -305,4 +305,13 @@ def send_to_telegram(message_text):
             result = json.loads(response.read().decode("utf-8"))
             if result.get("ok"):
                 print("تم إرسال الرسالة إلى تيليجرام بنجاح.")
-            else:
+            else:  
+                if valid_stocks:
+        messages = build_telegram_messages(valid_stocks, title=detected_session)
+        for msg in messages:
+            send_to_telegram(msg)
+            time.sleep(1.0)
+    else:
+        print("No stocks found.")
+
+                
